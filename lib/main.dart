@@ -882,6 +882,16 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   child: const Icon(Icons.arrow_forward, color: Colors.black, size: 34),
                 ),
               ),
+              const SizedBox(height: 46),
+              const Text(
+                'I already have an account. Sign In',
+                style: TextStyle(color: Colors.white70, fontSize: 18),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                'Privacy Policy   |   Terms of Service',
+                style: TextStyle(color: Colors.white54, fontSize: 13),
+              ),
             ],
           ),
         );
@@ -971,28 +981,68 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         );
       case 'info':
         final stats = (step.options['stats'] as List<dynamic>? ?? const <dynamic>[])
-            .map((e) => '$e')
+            .map(_coerceStatCard)
             .toList();
         return _buildQuestionWrapper(
           step,
           child: Column(
             children: [
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: stats
-                    .map(
-                      (s) => Container(
-                        width: 160,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: const Color(0xFFE7B86C), width: 1.2),
-                        ),
-                        child: Text(s, style: const TextStyle(color: Colors.white)),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: stats.length,
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  childAspectRatio: 1.05,
+                  mainAxisSpacing: 10,
+                  crossAxisSpacing: 10,
+                ),
+                itemBuilder: (_, i) {
+                  final item = stats[i];
+                  return Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: const Color(0xFFE7B86C), width: 1.3),
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Colors.white.withValues(alpha: 0.05),
+                          Colors.white.withValues(alpha: 0.01),
+                        ],
                       ),
-                    )
-                    .toList(),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          item.headline,
+                          style: const TextStyle(
+                            color: Color(0xFFE7B86C),
+                            fontSize: 24,
+                            fontWeight: FontWeight.w800,
+                            height: 1.1,
+                          ),
+                        ),
+                        Text(
+                          item.subline,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            height: 1.2,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'Preparing your sleep plan',
+                style: TextStyle(color: Colors.white70, fontSize: 18),
               ),
             ],
           ),
@@ -1165,9 +1215,38 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         const SizedBox(width: 56),
                     ],
                   ),
+                  const SizedBox(height: 4),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(99),
+                    child: LinearProgressIndicator(
+                      minHeight: 4,
+                      value: (_index + 1) / _totalSteps,
+                      backgroundColor: Colors.white.withValues(alpha: 0.14),
+                      valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFE7B86C)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   Expanded(
                     child: SingleChildScrollView(
-                      child: _buildStepContent(),
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 280),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        transitionBuilder: (child, animation) {
+                          final slide = Tween<Offset>(
+                            begin: const Offset(0.06, 0),
+                            end: Offset.zero,
+                          ).animate(animation);
+                          return FadeTransition(
+                            opacity: animation,
+                            child: SlideTransition(position: slide, child: child),
+                          );
+                        },
+                        child: KeyedSubtree(
+                          key: ValueKey<String>(_step.stepKey),
+                          child: _buildStepContent(),
+                        ),
+                      ),
                     ),
                   ),
                   if (_step.screenType != 'single_choice')
@@ -1749,6 +1828,27 @@ class OnboardingChoice {
   }
 }
 
+class OnboardingStatCard {
+  const OnboardingStatCard({
+    required this.headline,
+    required this.subline,
+  });
+
+  final String headline;
+  final String subline;
+}
+
+OnboardingStatCard _coerceStatCard(dynamic item) {
+  if (item is Map<String, dynamic>) {
+    return OnboardingStatCard(
+      headline: '${item['headline'] ?? item['title'] ?? item['value'] ?? 'Metric'}',
+      subline: '${item['subline'] ?? item['subtitle'] ?? item['description'] ?? ''}',
+    );
+  }
+  final text = '$item';
+  return OnboardingStatCard(headline: text, subline: '');
+}
+
 const String _fallbackAudioUrl = 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3';
 const Map<String, String> _mixerChannelUrls = <String, String>{
   'Rain': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
@@ -1850,7 +1950,14 @@ const List<OnboardingStepContent> _fallbackOnboardingScreens = <OnboardingStepCo
     screenType: 'info',
     title: 'Trusted by over 65 million people',
     subtitle: 'Preparing your sleep plan',
-    options: <String, dynamic>{},
+    options: <String, dynamic>{
+      'stats': <Map<String, String>>[
+        {'headline': '91%', 'subline': 'of listeners sleep better'},
+        {'headline': '4.8★', 'subline': '600k+ reviews'},
+        {'headline': '2B+', 'subline': 'relaxation sessions'},
+        {'headline': '65x', 'subline': 'featured in App Store'},
+      ],
+    },
     ctaLabel: 'Continue',
     skippable: true,
   ),
