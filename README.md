@@ -1,16 +1,151 @@
-# sleepwell
+# SleepWell: AI-Powered ASMR Sleep App
 
-AI-Powered ASMR Sleep App
+SleepWell is an MVP-first mobile product designed for rapid growth and habit retention.
+The product is fully free at this stage and optimized to collect behavioral signals for future AI personalization.
 
-## Getting Started
+## What is implemented
 
-This project is a starting point for a Flutter application.
+- Flutter MVP app flow in `lib/main.dart`
+  - Personalization onboarding
+  - One-tap `Sleep Now` mode
+  - Smart player UI (categories, loop, timer, fade-out action)
+  - Basic sleep tracking insights
+  - Sound mixer sliders
+- Laravel API and data foundation in `cariloker`
+  - API route group: `/api/v1/sleepwell/*`
+  - Analytics-ready schema for preferences, sessions, and events
+  - Admin page: `/dashboard/sleepwell`
 
-A few resources to get you started if this is your first Flutter project:
+## Product strategy (MVP)
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+- Growth first: all features are free, no paywalls, no ads.
+- Habit first: design pushes one primary action (`Sleep Now`) and low-friction bedtime usage.
+- Data first: schema captures preference and behavior events for future recommendation quality.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## App architecture
+
+### Mobile (Flutter)
+
+- Presentation: onboarding + tabbed home (`Sleep Now`, `Player`, `Mixer`, `Insights`)
+- State: centralized `SleepWellState` (`ChangeNotifier`) for quick MVP iteration
+- Domain entities:
+  - `SleepTrack`
+  - `SleepSession`
+- Integration points (next step):
+  - API client for `/api/v1/sleepwell/*`
+  - audio engine (`just_audio`) with background mode and fade automation
+
+### Backend (Laravel in `cariloker`)
+
+- API layer: REST endpoints for onboarding, catalog, sessions, events, insights, and mixer presets
+- Data layer: dedicated SleepWell tables (no coupling to job portal tables)
+- Backoffice:
+  - `/dashboard/sleepwell` for key health metrics
+  - room to add track/content management without refactor
+
+## Database schema (future personalization optimized)
+
+- `sleepwell_listeners`
+  - `device_id`, onboarding preferences, timezone, sleep difficulty, last active
+- `sleepwell_audio_tracks`
+  - category, talking/non-talking, duration, stream URL, active flag
+- `sleepwell_sleep_sessions`
+  - start/end/duration, mode (`player`/`sleep_now`), status, entry point
+- `sleepwell_session_events`
+  - event type (`skip`, `repeat`, `timer_set`, etc), event timestamp, track, metadata
+- `sleepwell_mix_presets`
+  - per-listener mixer channel volumes
+
+This schema is intentionally event-rich so recommendation/ranking models can be added later without breaking storage contracts.
+
+## User flow (MVP)
+
+1. Install and open app
+2. Onboarding captures talking preference, sound types, categories, sleep difficulty
+3. User taps `Sleep Now` from home
+4. App starts personalized sequence and session tracking
+5. During listening, app logs events (play, skip, repeat, timer, complete)
+6. Insights page shows frequency + consistency trends
+
+## Wireframe descriptions
+
+- Onboarding
+  - single column, dark calm UI, segmented and chip controls
+  - one CTA: `Start Sleeping Better`
+- Home / Sleep Now
+  - large centered primary button, minimal secondary choices
+- Player
+  - categorized track list + loop toggle + sleep timer + fade-out stop
+- Mixer
+  - simple slider rows, no complex visual noise
+- Insights
+  - 3-card overview: usage frequency, consistency score, average duration
+
+## API structure
+
+Base: `/api/v1/sleepwell`
+
+- `POST /onboarding`
+- `GET /catalog`
+- `POST /sessions/start`
+- `POST /sessions/{session}/event`
+- `POST /sessions/{session}/end`
+- `POST /sleep-now`
+- `GET /insights/{deviceId}`
+- `GET /mix-presets/{deviceId}`
+- `POST /mix-presets`
+
+## Development roadmap
+
+### Phase 1 (done in this repo)
+
+- MVP product flow and backend data foundation
+- Admin visibility for core usage metrics
+
+### Phase 2 (next 1-2 sprints)
+
+- Real audio playback service with background support
+- device ID persistence + API sync
+- automated fade-out + timer completion events
+- admin content CRUD for tracks and categories
+
+### Phase 3 (after PMF signal)
+
+- recommendation engine v1 from event history
+- nightly personalization jobs
+- experiment framework (A/B for onboarding and Sleep Now)
+
+## Cost-efficient infrastructure plan
+
+- App hosting: Flutter builds (Android/iOS)
+- Backend: single Laravel app server (small VM) + managed MySQL/Postgres
+- Storage/CDN: object storage for audio + CDN edge caching
+- Queues: lightweight worker only when recommendation jobs are introduced
+- Observability:
+  - start with Laravel logs + basic uptime checks
+  - add analytics warehouse only after event volume grows
+
+## Run locally
+
+### Flutter app
+
+```bash
+flutter pub get
+flutter run
+```
+
+### Laravel API/admin (`cariloker`)
+
+```bash
+cd cariloker
+composer install
+cp .env.example .env
+php artisan key:generate
+php artisan migrate
+php artisan serve
+```
+
+Then open:
+
+- API: `http://127.0.0.1:8000/api/v1/sleepwell/catalog`
+- Admin: `http://127.0.0.1:8000/dashboard/sleepwell`
