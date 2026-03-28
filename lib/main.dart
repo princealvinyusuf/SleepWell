@@ -56,6 +56,29 @@ class _SleepWellAppState extends State<SleepWellApp> {
           secondary: Color(0xFF68D3FF),
           surface: Color(0xFF151C34),
         ),
+        textTheme: ThemeData.dark().textTheme.apply(
+              bodyColor: Colors.white,
+              displayColor: Colors.white,
+            ),
+        chipTheme: ChipThemeData(
+          side: const BorderSide(color: Colors.white24),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+          backgroundColor: Colors.white.withValues(alpha: 0.06),
+        ),
+        navigationBarTheme: NavigationBarThemeData(
+          backgroundColor: const Color(0xFF0A0E1A).withValues(alpha: 0.96),
+          indicatorColor: const Color(0xFF2D3278),
+          labelTextStyle: WidgetStateProperty.resolveWith<TextStyle?>(
+            (states) {
+              final selected = states.contains(WidgetState.selected);
+              return TextStyle(
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                color: selected ? Colors.white : Colors.white60,
+              );
+            },
+          ),
+        ),
         useMaterial3: true,
       ),
       home: AnimatedBuilder(
@@ -107,6 +130,14 @@ class SleepWellState extends ChangeNotifier {
   };
   bool isMixerPlaying = false;
   List<MixPreset> mixerPresets = <MixPreset>[];
+  List<HomeSectionContent> homeSections = <HomeSectionContent>[];
+  final List<String> sleepGoals = <String>[
+    'Fall Asleep Faster',
+    'Sleep All Night',
+    'Relax & Unwind',
+    'Reduce Anxiety',
+  ];
+  String selectedSleepGoal = 'Fall Asleep Faster';
 
   bool isPlaying = false;
   bool isScreenDimmed = false;
@@ -167,6 +198,7 @@ class SleepWellState extends ChangeNotifier {
     await _configureAudio();
     await fetchOnboardingContent();
     await fetchCatalog();
+    await fetchHomeFeed();
     await refreshInsights();
     await refreshMixPresets();
     _startBedtimeTicker();
@@ -199,6 +231,19 @@ class SleepWellState extends ChangeNotifier {
       onboardingScreens = _fallbackOnboardingScreens;
       apiConnected = false;
       lastError = 'Using offline onboarding flow.';
+    }
+    notifyListeners();
+  }
+
+  Future<void> fetchHomeFeed() async {
+    try {
+      final data = await _api.fetchHomeFeed();
+      homeSections = data.isEmpty ? _fallbackHomeSections : data;
+      apiConnected = true;
+    } catch (_) {
+      homeSections = _fallbackHomeSections;
+      apiConnected = false;
+      lastError = 'Using offline home feed.';
     }
     notifyListeners();
   }
@@ -457,6 +502,21 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setSelectedSleepGoal(String goal) {
+    selectedSleepGoal = goal;
+    unawaited(_persistLocalState());
+    notifyListeners();
+  }
+
+  HomeSectionContent? sectionByKey(String key) {
+    for (final section in homeSections) {
+      if (section.sectionKey == key) {
+        return section;
+      }
+    }
+    return null;
+  }
+
   void setBedtimeRoutineEnabled(bool enabled) {
     bedtimeRoutineEnabled = enabled;
     if (enabled) {
@@ -562,6 +622,7 @@ class SleepWellState extends ChangeNotifier {
     final bedtimeHour = prefs.getInt('bedtime_hour') ?? bedtimeTime.hour;
     final bedtimeMinute = prefs.getInt('bedtime_minute') ?? bedtimeTime.minute;
     bedtimeTime = TimeOfDay(hour: bedtimeHour, minute: bedtimeMinute);
+    selectedSleepGoal = prefs.getString('selected_sleep_goal') ?? selectedSleepGoal;
 
     preferredCategories
       ..clear()
@@ -599,6 +660,7 @@ class SleepWellState extends ChangeNotifier {
     await prefs.setBool('bedtime_routine_enabled', bedtimeRoutineEnabled);
     await prefs.setInt('bedtime_hour', bedtimeTime.hour);
     await prefs.setInt('bedtime_minute', bedtimeTime.minute);
+    await prefs.setString('selected_sleep_goal', selectedSleepGoal);
     await prefs.setString('mixer_state', jsonEncode(mixer));
   }
 
@@ -1355,29 +1417,30 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final pages = [
-      SleepNowPage(state: widget.state),
+      HomeHubPage(state: widget.state),
       PlayerPage(state: widget.state),
-      MixerPage(state: widget.state),
+      SleepNowPage(state: widget.state),
       InsightsPage(state: widget.state),
+      SavedPage(state: widget.state),
     ];
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('SleepWell'),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: Chip(
-              label: Text(widget.state.apiConnected ? 'API Connected' : 'Offline Mode'),
-              backgroundColor: widget.state.apiConnected
-                  ? Colors.green.withValues(alpha: 0.2)
-                  : Colors.orange.withValues(alpha: 0.2),
-              side: BorderSide.none,
-            ),
-          ),
-        ],
-      ),
       body: Stack(
         children: [
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    const Color(0xFF1E2343).withValues(alpha: 0.55),
+                    const Color(0xFF0C101F),
+                    const Color(0xFF090C18),
+                  ],
+                ),
+              ),
+            ),
+          ),
           Column(
             children: [
               if (widget.state.lastError != null)
@@ -1393,6 +1456,59 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(child: pages[index]),
             ],
           ),
+          if (widget.state.selectedTrack != null)
+            Positioned(
+              left: 14,
+              right: 14,
+              bottom: 92,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF4951B9), Color(0xFF6A45BF)],
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.3),
+                      blurRadius: 16,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: ListTile(
+                  dense: true,
+                  leading: Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.18),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    alignment: Alignment.center,
+                    child: const Icon(Icons.music_note_rounded, color: Colors.white),
+                  ),
+                  title: Text(
+                    widget.state.selectedTrack!.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: const Text(
+                    'My Favorite Mix',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                  trailing: IconButton(
+                    icon: Icon(
+                      widget.state.isPlaying ? Icons.pause : Icons.play_arrow,
+                      color: Colors.white,
+                    ),
+                    onPressed: () async {
+                      await widget.state.togglePlayPause();
+                    },
+                  ),
+                ),
+              ),
+            ),
           IgnorePointer(
             ignoring: true,
             child: AnimatedOpacity(
@@ -1403,15 +1519,719 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: index,
-        onDestinationSelected: (i) => setState(() => index = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.nights_stay), label: 'Sleep Now'),
-          NavigationDestination(icon: Icon(Icons.play_circle), label: 'Player'),
-          NavigationDestination(icon: Icon(Icons.tune), label: 'Mixer'),
-          NavigationDestination(icon: Icon(Icons.bar_chart), label: 'Insights'),
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Container(
+          height: 78,
+          margin: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0A0E1A).withValues(alpha: 0.96),
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: Colors.white10),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.35),
+                blurRadius: 20,
+                offset: const Offset(0, 8),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              _navItem(i: 0, icon: Icons.home_rounded, label: 'Home'),
+              _navItem(i: 1, icon: Icons.music_note_rounded, label: 'Sounds'),
+              _navItem(i: 2, icon: Icons.nights_stay_rounded, label: 'Routine', emphasize: true),
+              _navItem(i: 3, icon: Icons.bar_chart_rounded, label: 'Insights'),
+              _navItem(i: 4, icon: Icons.favorite_border_rounded, label: 'Saved'),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _navItem({
+    required int i,
+    required IconData icon,
+    required String label,
+    bool emphasize = false,
+  }) {
+    final selected = index == i;
+    final iconWidget = emphasize
+        ? Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: LinearGradient(
+                colors: selected
+                    ? const [Color(0xFF5D5EFF), Color(0xFF3E47F2)]
+                    : const [Color(0xFF2B2E55), Color(0xFF1F2345)],
+              ),
+              boxShadow: selected
+                  ? [
+                      BoxShadow(
+                        color: const Color(0xFF5D5EFF).withValues(alpha: 0.35),
+                        blurRadius: 12,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Icon(icon, color: Colors.white),
+          )
+        : Icon(icon, color: selected ? Colors.white : Colors.white60);
+
+    return Expanded(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () => setState(() => index = i),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              iconWidget,
+              const SizedBox(height: 3),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: selected ? Colors.white : Colors.white54,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class HomeHubPage extends StatefulWidget {
+  const HomeHubPage({super.key, required this.state});
+  final SleepWellState state;
+
+  @override
+  State<HomeHubPage> createState() => _HomeHubPageState();
+}
+
+class _HomeHubPageState extends State<HomeHubPage> {
+  late final PageController _featuredController;
+  Timer? _featuredTicker;
+  int _featuredIndex = 0;
+  int _featuredItemCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _featuredController = PageController(viewportFraction: 0.94);
+  }
+
+  @override
+  void dispose() {
+    _featuredTicker?.cancel();
+    _featuredController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = widget.state;
+    final featured = state.sectionByKey('featured_content');
+    final explore = state.sectionByKey('explore_grid');
+    final therapyPromo = state.sectionByKey('promo_therapy');
+    final sleepRecorder = state.sectionByKey('sleep_recorder');
+    final coloredNoises = state.sectionByKey('colored_noises');
+    final topRated = state.sectionByKey('top_rated');
+    final quickTopics = state.sectionByKey('quick_topics');
+    final discover = state.sectionByKey('discover_banner');
+    final trySomethingElse = state.sectionByKey('try_something_else');
+    final curatedPlaylists = state.sectionByKey('curated_playlists');
+    final sleepHypnosis = state.sectionByKey('sleep_hypnosis');
+
+    final featuredItems = featured?.items ?? const <HomeItemContent>[];
+    _ensureFeaturedTicker(featuredItems.length);
+
+    return RefreshIndicator(
+      onRefresh: () => state.fetchHomeFeed(),
+      child: ListView(
+        physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+        padding: const EdgeInsets.fromLTRB(16, 18, 16, 180),
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Good evening',
+                  style: TextStyle(fontSize: 38, fontWeight: FontWeight.w800),
+                ),
+              ),
+              IconButton(onPressed: () {}, icon: const Icon(Icons.search_rounded)),
+              IconButton(onPressed: () {}, icon: const Icon(Icons.account_circle_rounded)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.graphic_eq, color: Colors.black87, size: 18),
+                    SizedBox(width: 8),
+                    Text('Recorder', style: TextStyle(color: Colors.black, fontWeight: FontWeight.w700)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text('My mixes', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 84,
+            child: ListView(
+              physics: const BouncingScrollPhysics(),
+              scrollDirection: Axis.horizontal,
+              children: [
+                _mixBubble(icon: Icons.add),
+                const SizedBox(width: 10),
+                _mixPill(
+                  title: state.mixerPresets.isEmpty ? 'Your First Mix' : state.mixerPresets.first.name,
+                  isPlaying: state.isMixerPlaying || state.isPlaying,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 18),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.04),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Your sleep goal', style: TextStyle(color: Colors.white70)),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    value: state.selectedSleepGoal,
+                    items: state.sleepGoals
+                        .map((goal) => DropdownMenuItem<String>(value: goal, child: Text(goal)))
+                        .toList(),
+                    dropdownColor: const Color(0xFF111118),
+                    decoration: InputDecoration(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      filled: true,
+                      fillColor: Colors.white.withValues(alpha: 0.06),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: Colors.white24),
+                      ),
+                    ),
+                    onChanged: (value) {
+                      if (value != null) {
+                        state.setSelectedSleepGoal(value);
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          _sectionHeader(featured?.title ?? 'Featured content'),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 148,
+            child: PageView.builder(
+              controller: _featuredController,
+              itemCount: featuredItems.isEmpty ? 1 : featuredItems.length,
+              onPageChanged: (idx) => setState(() => _featuredIndex = idx),
+              itemBuilder: (_, i) {
+                final item = featuredItems.isEmpty
+                    ? const HomeItemContent(title: 'Night Session', subtitle: 'Relax and drift to sleep')
+                    : featuredItems[i];
+                final isActive = i == _featuredIndex;
+                return Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: AnimatedScale(
+                    duration: const Duration(milliseconds: 260),
+                    curve: Curves.easeOutCubic,
+                    scale: isActive ? 1.0 : 0.96,
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 260),
+                      opacity: isActive ? 1.0 : 0.82,
+                      child: _heroCard(item: item),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 8),
+          Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(max(1, featuredItems.length), (idx) {
+                final active = _featuredIndex == idx;
+                return AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  width: active ? 20 : 7,
+                  height: 7,
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  decoration: BoxDecoration(
+                    color: active ? Colors.white : Colors.white30,
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                );
+              }),
+            ),
+          ),
+          const SizedBox(height: 18),
+          _sectionHeader(explore?.title ?? 'Explore more'),
+          const SizedBox(height: 12),
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 3,
+              mainAxisSpacing: 10,
+              crossAxisSpacing: 10,
+              childAspectRatio: 1.25,
+            ),
+            itemCount: (explore?.items.length ?? 0).clamp(0, 6),
+            itemBuilder: (_, i) {
+              final item = explore!.items[i];
+              return DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.04),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.white10),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(item.emoji ?? '✨', style: const TextStyle(fontSize: 20)),
+                    const SizedBox(height: 6),
+                    Text(item.title, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  ],
+                ),
+              );
+            },
+          ),
+          if (therapyPromo != null && therapyPromo.items.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            _sectionHeader(therapyPromo.title ?? 'Still waking up tired?'),
+            const SizedBox(height: 10),
+            _promoCard(
+              headline: therapyPromo.items.first.title,
+              description: therapyPromo.items.first.subtitle ?? '',
+              cta: therapyPromo.items.first.ctaLabel ?? 'Learn more',
+              accent: const Color(0xFF2BD8C7),
+            ),
+          ],
+          if (sleepRecorder != null && sleepRecorder.items.isNotEmpty) ...[
+            const SizedBox(height: 18),
+            _sleepRecorderCard(sleepRecorder),
+          ],
+          if (coloredNoises != null) ...[
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(child: _sectionHeader(coloredNoises.title ?? 'Colored Noises')),
+                TextButton(
+                  onPressed: () {},
+                  child: const Text('See all'),
+                ),
+              ],
+            ),
+            if ((coloredNoises.subtitle ?? '').isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2, bottom: 8),
+                child: Text(coloredNoises.subtitle!, style: const TextStyle(color: Colors.white70)),
+              ),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: coloredNoises.items
+                  .map(
+                    (item) => Chip(
+                      label: Text(item.title),
+                      avatar: const Icon(Icons.graphic_eq_rounded, size: 16),
+                      backgroundColor: Colors.white.withValues(alpha: 0.06),
+                      side: const BorderSide(color: Colors.white24),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+          if (topRated != null) ...[
+            const SizedBox(height: 18),
+            _sectionHeader(topRated.title ?? 'Top 5 rated'),
+            const SizedBox(height: 8),
+            ...topRated.items.map(
+              (item) => InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => _playBestMatchTrack(item.title),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 5),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 36,
+                        child: Text(
+                          '${item.rank == 0 ? topRated.items.indexOf(item) + 1 : item.rank}',
+                          style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: Color(0xFFE5C065)),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        width: 56,
+                        height: 56,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF24598D), Color(0xFF123A5B)],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                            Text(item.subtitle ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+          if (quickTopics != null && quickTopics.items.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 42,
+              child: ListView(
+                physics: const BouncingScrollPhysics(),
+                scrollDirection: Axis.horizontal,
+                children: quickTopics.items
+                    .map(
+                      (item) => InkWell(
+                        borderRadius: BorderRadius.circular(999),
+                        onTap: () => _playBestMatchTrack(item.title),
+                        child: Container(
+                          margin: const EdgeInsets.only(right: 8),
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(color: Colors.white24),
+                            color: Colors.black.withValues(alpha: 0.18),
+                          ),
+                          alignment: Alignment.center,
+                          child: Text('${item.emoji ?? '•'}  ${item.title}', style: const TextStyle(fontWeight: FontWeight.w700)),
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+          ],
+          if (discover != null && discover.items.isNotEmpty) ...[
+            const SizedBox(height: 18),
+            _discoverBanner(discover.items.first),
+          ],
+          if (trySomethingElse != null) _horizontalSection(trySomethingElse),
+          if (curatedPlaylists != null) _horizontalSection(curatedPlaylists),
+          if (sleepHypnosis != null) _horizontalSection(sleepHypnosis),
         ],
+      ),
+    );
+  }
+
+  void _ensureFeaturedTicker(int itemCount) {
+    if (_featuredItemCount == itemCount && (_featuredTicker != null || itemCount <= 1)) {
+      return;
+    }
+    _featuredItemCount = itemCount;
+    _featuredTicker?.cancel();
+    _featuredTicker = null;
+    if (itemCount <= 1) {
+      return;
+    }
+    _featuredTicker = Timer.periodic(const Duration(seconds: 6), (_) {
+      if (!mounted || !_featuredController.hasClients) {
+        return;
+      }
+      final nextIndex = (_featuredIndex + 1) % itemCount;
+      _featuredController.animateToPage(
+        nextIndex,
+        duration: const Duration(milliseconds: 560),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  Widget _sectionHeader(String text) {
+    return Text(text, style: const TextStyle(fontSize: 31, fontWeight: FontWeight.w700, letterSpacing: -0.2));
+  }
+
+  Widget _heroCard({required HomeItemContent item}) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: () => _playBestMatchTrack(item.title),
+      child: Container(
+        width: 300,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          gradient: const LinearGradient(colors: [Color(0xFF24327F), Color(0xFF4D63D4)]),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF4D63D4).withValues(alpha: 0.24),
+              blurRadius: 18,
+              offset: const Offset(0, 7),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(item.title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+            const Spacer(),
+            Text(item.subtitle ?? '', maxLines: 1, overflow: TextOverflow.ellipsis),
+            const SizedBox(height: 6),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+              onPressed: () => _playBestMatchTrack(item.title),
+              child: Text(item.ctaLabel ?? 'Listen'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _promoCard({
+    required String headline,
+    required String description,
+    required String cta,
+    required Color accent,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(colors: [Color(0xFF1A3550), Color(0xFF12263A)]),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(headline, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 6),
+          Text(description, style: const TextStyle(color: Colors.white70)),
+          const SizedBox(height: 14),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.black),
+            onPressed: () {},
+            child: Text(cta),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sleepRecorderCard(HomeSectionContent section) {
+    final card = section.items.first;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(colors: [Color(0xFF19181F), Color(0xFF141321)]),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(section.title ?? 'Sleep Recorder', style: const TextStyle(color: Color(0xFFE3B260), fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text(card.title, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: Text(card.subtitle ?? '', style: const TextStyle(color: Colors.white70)),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+                onPressed: () {},
+                child: Text(card.ctaLabel ?? 'Start Recorder'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _discoverBanner(HomeItemContent item) {
+    return Container(
+      width: double.infinity,
+      height: 132,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(colors: [Color(0xFF3E2D20), Color(0xFF201410)]),
+      ),
+      child: Center(
+        child: Text(
+          item.title.toUpperCase(),
+          style: const TextStyle(
+            letterSpacing: 3.4,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _horizontalSection(HomeSectionContent section) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 18, top: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionHeader(section.title ?? ''),
+          if ((section.subtitle ?? '').isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(section.subtitle!, style: const TextStyle(color: Colors.white70)),
+            ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 170,
+            child: ListView(
+              physics: const BouncingScrollPhysics(),
+              scrollDirection: Axis.horizontal,
+              children: section.items
+                  .map(
+                    (item) => InkWell(
+                      borderRadius: BorderRadius.circular(16),
+                      onTap: () => _playBestMatchTrack(item.title),
+                      child: Container(
+                        width: 170,
+                        margin: const EdgeInsets.only(right: 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(16),
+                                child: Container(
+                                  color: Colors.white.withValues(alpha: 0.08),
+                                  child: item.imageUrl == null
+                                      ? const Center(child: Icon(Icons.nights_stay_rounded))
+                                      : Image.network(
+                                          item.imageUrl!,
+                                          fit: BoxFit.cover,
+                                          width: double.infinity,
+                                          errorBuilder: (_, __, ___) => const Center(child: Icon(Icons.broken_image)),
+                                        ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+                            Text(item.subtitle ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _playBestMatchTrack(String query) {
+    final tracks = widget.state.tracks;
+    if (tracks.isEmpty) {
+      return;
+    }
+    final queryLower = query.toLowerCase();
+    SleepTrack? selected;
+    for (final track in tracks) {
+      final titleLower = track.title.toLowerCase();
+      if (titleLower.contains(queryLower) || queryLower.contains(titleLower)) {
+        selected = track;
+        break;
+      }
+    }
+    selected ??= tracks.first;
+    unawaited(widget.state.playTrack(selected));
+  }
+
+  Widget _mixBubble({required IconData icon}) {
+    return Container(
+      width: 84,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Colors.white.withValues(alpha: 0.04),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Icon(icon, size: 30),
+    );
+  }
+
+  Widget _mixPill({required String title, required bool isPlaying}) {
+    return Container(
+      width: 280,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white54),
+      ),
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: Colors.white.withValues(alpha: 0.08),
+          child: const Icon(Icons.tune_rounded),
+        ),
+        title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing: Icon(isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
+      ),
+    );
+  }
+}
+
+class SavedPage extends StatelessWidget {
+  const SavedPage({super.key, required this.state});
+  final SleepWellState state;
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Text(
+        'Saved content will appear here.',
+        style: TextStyle(color: Colors.white70),
       ),
     );
   }
@@ -1756,6 +2576,88 @@ class MixPreset {
   }
 }
 
+class HomeSectionContent {
+  const HomeSectionContent({
+    required this.sectionKey,
+    required this.title,
+    required this.subtitle,
+    required this.sectionType,
+    required this.items,
+  });
+
+  final String sectionKey;
+  final String? title;
+  final String? subtitle;
+  final String sectionType;
+  final List<HomeItemContent> items;
+
+  factory HomeSectionContent.fromJson(
+    Map<String, dynamic> json, {
+    required String apiBaseUrl,
+  }) {
+    final rawItems = (json['items'] as List<dynamic>? ?? <dynamic>[]);
+    return HomeSectionContent(
+      sectionKey: '${json['section_key'] ?? ''}',
+      title: json['title']?.toString(),
+      subtitle: json['subtitle']?.toString(),
+      sectionType: '${json['section_type'] ?? 'horizontal'}',
+      items: rawItems
+          .whereType<Map<String, dynamic>>()
+          .map((item) => HomeItemContent.fromJson(item, apiBaseUrl: apiBaseUrl))
+          .toList(),
+    );
+  }
+}
+
+class HomeItemContent {
+  const HomeItemContent({
+    required this.title,
+    this.subtitle,
+    this.tag,
+    this.imageUrl,
+    this.iconUrl,
+    this.ctaLabel,
+    this.meta = const <String, dynamic>{},
+  });
+
+  final String title;
+  final String? subtitle;
+  final String? tag;
+  final String? imageUrl;
+  final String? iconUrl;
+  final String? ctaLabel;
+  final Map<String, dynamic> meta;
+
+  int get rank => _toInt(meta['rank']);
+  String? get emoji => meta['emoji']?.toString();
+
+  factory HomeItemContent.fromJson(
+    Map<String, dynamic> json, {
+    required String apiBaseUrl,
+  }) {
+    final rawMeta = (json['meta'] is Map<String, dynamic>)
+        ? json['meta'] as Map<String, dynamic>
+        : <String, dynamic>{};
+
+    final imageRaw = json['image_url']?.toString();
+    final iconRaw = json['icon_url']?.toString();
+
+    return HomeItemContent(
+      title: '${json['title'] ?? ''}',
+      subtitle: json['subtitle']?.toString(),
+      tag: json['tag']?.toString(),
+      imageUrl: imageRaw == null || imageRaw.isEmpty
+          ? null
+          : _normalizeMediaUrl(imageRaw, apiBaseUrl: apiBaseUrl),
+      iconUrl: iconRaw == null || iconRaw.isEmpty
+          ? null
+          : _normalizeMediaUrl(iconRaw, apiBaseUrl: apiBaseUrl),
+      ctaLabel: json['cta_label']?.toString(),
+      meta: rawMeta,
+    );
+  }
+}
+
 class OnboardingStepContent {
   const OnboardingStepContent({
     required this.stepKey,
@@ -1972,6 +2874,110 @@ const List<OnboardingStepContent> _fallbackOnboardingScreens = <OnboardingStepCo
   ),
 ];
 
+const List<HomeSectionContent> _fallbackHomeSections = <HomeSectionContent>[
+  HomeSectionContent(
+    sectionKey: 'featured_content',
+    title: 'Featured content',
+    subtitle: null,
+    sectionType: 'hero_carousel',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'Spring Forward',
+        subtitle: 'Let us gently ease your body clock.',
+        ctaLabel: 'Listen',
+      ),
+      HomeItemContent(
+        title: 'Unwind Tonight',
+        subtitle: 'Drift off with calm evening sessions.',
+        ctaLabel: 'Listen',
+      ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'explore_grid',
+    title: 'Explore more',
+    subtitle: null,
+    sectionType: 'grid',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Sounds', meta: <String, dynamic>{'emoji': '🔥'}),
+      HomeItemContent(title: 'Mixes', meta: <String, dynamic>{'emoji': '🎭'}),
+      HomeItemContent(title: 'Music', meta: <String, dynamic>{'emoji': '🎼'}),
+      HomeItemContent(title: 'Meditations', meta: <String, dynamic>{'emoji': '🌅'}),
+      HomeItemContent(title: 'SleepTales', meta: <String, dynamic>{'emoji': '📖'}),
+      HomeItemContent(title: 'Favorites', meta: <String, dynamic>{'emoji': '❤️'}),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'promo_therapy',
+    title: 'Still waking up tired?',
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'You have 50% off your first month of therapy',
+        subtitle: 'Take the assessment',
+        ctaLabel: 'Take the assessment',
+      ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'sleep_recorder',
+    title: 'Sleep Recorder',
+    subtitle: 'Monitor and improve',
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'Monitor and improve',
+        subtitle: 'Consistency is the best way to improve sleep',
+        ctaLabel: 'Start Recorder',
+      ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'colored_noises',
+    title: 'Colored Noises',
+    subtitle: 'A rainbow of noises awaits.',
+    sectionType: 'chips',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'White Noise'),
+      HomeItemContent(title: 'Green Noise'),
+      HomeItemContent(title: 'Deep Brown'),
+      HomeItemContent(title: 'Violet Noise'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'top_rated',
+    title: 'Top 5 rated',
+    subtitle: null,
+    sectionType: 'top_ranked',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Green Noise Deep Sleep Hypnosis', subtitle: 'Meditation', meta: <String, dynamic>{'rank': 1}),
+      HomeItemContent(title: "Rosemary's Quilt of Memories", subtitle: 'SleepTale', meta: <String, dynamic>{'rank': 2}),
+      HomeItemContent(title: 'Bedtime Bliss Sleep Hypnosis', subtitle: 'Meditation', meta: <String, dynamic>{'rank': 3}),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'quick_topics',
+    title: null,
+    subtitle: null,
+    sectionType: 'chips',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Sleep Faster', meta: <String, dynamic>{'emoji': '🏁'}),
+      HomeItemContent(title: 'Hypnosis', meta: <String, dynamic>{'emoji': '🌀'}),
+      HomeItemContent(title: 'Napping', meta: <String, dynamic>{'emoji': '😴'}),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'discover_banner',
+    title: null,
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'DISCOVER'),
+    ],
+  ),
+];
+
 class SleepWellApi {
   static const String baseUrl = String.fromEnvironment(
     'SLEEPWELL_API_BASE_URL',
@@ -2033,6 +3039,15 @@ class SleepWellApi {
     return raw
         .whereType<Map<String, dynamic>>()
         .map(OnboardingStepContent.fromJson)
+        .toList();
+  }
+
+  Future<List<HomeSectionContent>> fetchHomeFeed() async {
+    final json = await _request('GET', '/home-feed');
+    final raw = (json['sections'] as List<dynamic>? ?? <dynamic>[]);
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map((item) => HomeSectionContent.fromJson(item, apiBaseUrl: baseUrl))
         .toList();
   }
 
