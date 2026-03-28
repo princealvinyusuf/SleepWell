@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -81,6 +82,7 @@ class SleepWellState extends ChangeNotifier {
   final bool _enableAudio;
   final AudioPlayer _player = AudioPlayer();
   final Map<String, AudioPlayer> _mixerPlayers = <String, AudioPlayer>{};
+  SharedPreferences? _prefs;
   StreamSubscription<Duration>? _positionSubscription;
   StreamSubscription<PlayerState>? _playerStateSubscription;
   Timer? _sleepTimer;
@@ -90,7 +92,7 @@ class SleepWellState extends ChangeNotifier {
   bool isBusy = false;
   bool apiConnected = false;
   String? lastError;
-  final String deviceId = SleepWellApi.defaultDeviceId;
+  String deviceId = SleepWellApi.defaultDeviceId;
 
   bool isOnboarded = false;
   bool prefersTalking = false;
@@ -107,6 +109,7 @@ class SleepWellState extends ChangeNotifier {
   List<MixPreset> mixerPresets = <MixPreset>[];
 
   bool isPlaying = false;
+  bool isScreenDimmed = false;
   bool enableMixerInSleepNow = true;
   bool loop = true;
   bool bedtimeRoutineEnabled = false;
@@ -158,6 +161,8 @@ class SleepWellState extends ChangeNotifier {
   Future<void> bootstrap() async {
     isBootstrapping = true;
     notifyListeners();
+    _prefs = await SharedPreferences.getInstance();
+    _restoreLocalState();
     await _configureAudio();
     await fetchCatalog();
     await refreshInsights();
@@ -215,6 +220,7 @@ class SleepWellState extends ChangeNotifier {
       apiConnected = false;
       lastError = 'Onboarding saved locally. API unavailable.';
     }
+    await _persistLocalState();
     isBusy = false;
     notifyListeners();
   }
@@ -250,6 +256,7 @@ class SleepWellState extends ChangeNotifier {
       await _logEvent('schedule_adherence_hit');
     }
     await _playSelectedTrack();
+    isScreenDimmed = true;
     if (enableMixerInSleepNow && !isMixerPlaying) {
       await toggleMixerPlayback();
     }
@@ -261,6 +268,7 @@ class SleepWellState extends ChangeNotifier {
   Future<void> playTrack(SleepTrack track) async {
     await _cancelSleepTimer();
     selectedTrack = track;
+    isScreenDimmed = false;
     sessions.add(SleepSession(DateTime.now(), 0));
     await _startSession(mode: 'player', entryPoint: 'player_track_tap');
     await _playSelectedTrack();
@@ -274,6 +282,7 @@ class SleepWellState extends ChangeNotifier {
       await toggleMixerPlayback();
     }
     isPlaying = false;
+    isScreenDimmed = false;
     await _cancelSleepTimer();
     currentPosition = Duration.zero;
     final endedAt = DateTime.now();
@@ -310,6 +319,7 @@ class SleepWellState extends ChangeNotifier {
     if (_enableAudio && isMixerPlaying) {
       unawaited(_mixerPlayers[key]?.setVolume(value));
     }
+    unawaited(_persistLocalState());
     notifyListeners();
   }
 
@@ -397,6 +407,7 @@ class SleepWellState extends ChangeNotifier {
       }
     }
     await _logEvent('mixer_preset_apply');
+    await _persistLocalState();
     notifyListeners();
   }
 
@@ -420,6 +431,7 @@ class SleepWellState extends ChangeNotifier {
 
   void setSleepNowMixerEnabled(bool enabled) {
     enableMixerInSleepNow = enabled;
+    unawaited(_persistLocalState());
     notifyListeners();
   }
 
@@ -428,12 +440,14 @@ class SleepWellState extends ChangeNotifier {
     if (enabled) {
       lastError = 'Bedtime routine set for ${_formatTimeOfDay(bedtimeTime)}.';
     }
+    unawaited(_persistLocalState());
     notifyListeners();
   }
 
   void setBedtimeTime(TimeOfDay value) {
     bedtimeTime = value;
     lastError = 'Bedtime updated to ${_formatTimeOfDay(value)}.';
+    unawaited(_persistLocalState());
     notifyListeners();
   }
 
@@ -509,6 +523,61 @@ class SleepWellState extends ChangeNotifier {
     } catch (_) {
       apiConnected = false;
     }
+  }
+
+  void _restoreLocalState() {
+    final prefs = _prefs;
+    if (prefs == null) {
+      return;
+    }
+
+    deviceId = prefs.getString('device_id') ?? SleepWellApi.defaultDeviceId;
+    isOnboarded = prefs.getBool('is_onboarded') ?? false;
+    prefersTalking = prefs.getBool('prefers_talking') ?? false;
+    sleepDifficulty = prefs.getInt('sleep_difficulty') ?? 3;
+    enableMixerInSleepNow = prefs.getBool('enable_mixer_in_sleep_now') ?? true;
+    bedtimeRoutineEnabled = prefs.getBool('bedtime_routine_enabled') ?? false;
+    final bedtimeHour = prefs.getInt('bedtime_hour') ?? bedtimeTime.hour;
+    final bedtimeMinute = prefs.getInt('bedtime_minute') ?? bedtimeTime.minute;
+    bedtimeTime = TimeOfDay(hour: bedtimeHour, minute: bedtimeMinute);
+
+    preferredCategories
+      ..clear()
+      ..addAll(prefs.getStringList('preferred_categories') ?? const <String>[]);
+    preferredSoundTypes
+      ..clear()
+      ..addAll(prefs.getStringList('preferred_sound_types') ?? const <String>[]);
+
+    final mixerRaw = prefs.getString('mixer_state');
+    if (mixerRaw != null && mixerRaw.isNotEmpty) {
+      final decoded = jsonDecode(mixerRaw);
+      if (decoded is Map<String, dynamic>) {
+        for (final entry in decoded.entries) {
+          mixer[entry.key] = _toDouble(entry.value).clamp(0.0, 1.0);
+        }
+      }
+    }
+
+    unawaited(_persistLocalState());
+  }
+
+  Future<void> _persistLocalState() async {
+    final prefs = _prefs;
+    if (prefs == null) {
+      return;
+    }
+
+    await prefs.setString('device_id', deviceId);
+    await prefs.setBool('is_onboarded', isOnboarded);
+    await prefs.setBool('prefers_talking', prefersTalking);
+    await prefs.setInt('sleep_difficulty', sleepDifficulty);
+    await prefs.setStringList('preferred_categories', preferredCategories);
+    await prefs.setStringList('preferred_sound_types', preferredSoundTypes);
+    await prefs.setBool('enable_mixer_in_sleep_now', enableMixerInSleepNow);
+    await prefs.setBool('bedtime_routine_enabled', bedtimeRoutineEnabled);
+    await prefs.setInt('bedtime_hour', bedtimeTime.hour);
+    await prefs.setInt('bedtime_minute', bedtimeTime.minute);
+    await prefs.setString('mixer_state', jsonEncode(mixer));
   }
 
   Future<void> _configureAudio() async {
@@ -849,19 +918,31 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: Column(
+      body: Stack(
         children: [
-          if (widget.state.lastError != null)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(10),
-              color: Colors.orange.withValues(alpha: 0.2),
-              child: Text(
-                widget.state.lastError!,
-                style: const TextStyle(fontSize: 12),
-              ),
+          Column(
+            children: [
+              if (widget.state.lastError != null)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  color: Colors.orange.withValues(alpha: 0.2),
+                  child: Text(
+                    widget.state.lastError!,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              Expanded(child: pages[index]),
+            ],
+          ),
+          IgnorePointer(
+            ignoring: true,
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 500),
+              opacity: widget.state.isScreenDimmed ? 0.35 : 0.0,
+              child: Container(color: Colors.black),
             ),
-          Expanded(child: pages[index]),
+          ),
         ],
       ),
       bottomNavigationBar: NavigationBar(
