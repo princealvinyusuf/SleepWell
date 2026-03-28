@@ -520,9 +520,11 @@ class SleepWellState extends ChangeNotifier {
       return;
     }
 
-    final primaryUrl = selectedTrack!.streamUrl?.trim().isNotEmpty == true
-        ? selectedTrack!.streamUrl!.trim()
-        : _fallbackAudioUrl;
+    final rawUrl = selectedTrack!.streamUrl?.trim();
+    final primaryUrl = _normalizeMediaUrl(
+      rawUrl?.isNotEmpty == true ? rawUrl! : _fallbackAudioUrl,
+      apiBaseUrl: SleepWellApi.baseUrl,
+    );
 
     Future<void> playFromUrl(String url) async {
       await _player.setAudioSource(
@@ -554,7 +556,7 @@ class SleepWellState extends ChangeNotifier {
         await playFromUrl(_fallbackAudioUrl);
         currentDuration = _player.duration ?? Duration.zero;
         isPlaying = true;
-        lastError = 'Track URL unavailable, fallback audio playing.';
+        lastError = 'Track URL unavailable ($primaryUrl), fallback audio playing.';
         await _scheduleSleepTimer();
       } catch (_) {
         isPlaying = false;
@@ -1137,7 +1139,7 @@ const Map<String, String> _mixerChannelUrls = <String, String>{
 class SleepWellApi {
   static const String baseUrl = String.fromEnvironment(
     'SLEEPWELL_API_BASE_URL',
-    defaultValue: 'http://127.0.0.1:8000/api/v1/sleepwell',
+    defaultValue: 'https://cariloker.info/api/v1/sleepwell',
   );
 
   static String get defaultDeviceId {
@@ -1306,6 +1308,40 @@ class SleepWellApi {
     }
     return <String, dynamic>{};
   }
+}
+
+String _normalizeMediaUrl(String input, {required String apiBaseUrl}) {
+  final value = input.trim();
+  final apiUri = Uri.parse(apiBaseUrl);
+
+  Uri uri;
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    uri = Uri.parse(value);
+  } else if (value.startsWith('/')) {
+    uri = apiUri.resolve(value);
+  } else {
+    uri = apiUri.resolve('/$value');
+  }
+
+  final host = uri.host.toLowerCase();
+  final apiHost = apiUri.host.toLowerCase();
+  final isLocalHost = host == 'localhost' || host == '127.0.0.1';
+  final isApiLocal = apiHost == 'localhost' || apiHost == '127.0.0.1';
+
+  if (isLocalHost && !isApiLocal) {
+    return uri
+        .replace(
+          scheme: apiUri.scheme,
+          host: apiUri.host,
+          port: apiUri.hasPort ? apiUri.port : null,
+        )
+        .toString();
+  }
+
+  if (Platform.isAndroid && isLocalHost) {
+    return uri.replace(host: '10.0.2.2').toString();
+  }
+  return uri.toString();
 }
 
 int _toInt(dynamic value) {
