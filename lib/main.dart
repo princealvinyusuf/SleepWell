@@ -94,6 +94,30 @@ class _SleepWellAppState extends State<SleepWellApp> {
   }
 }
 
+// Frozen baseline tokens (final UI pass) for consistent spacing/radius.
+class _UiBaseline {
+  static const double pageHorizontal = 16;
+  static const double pageTop = 12;
+  static const double pageBottomInset = 180;
+  static const double sectionGap = 18;
+
+  static const double radiusSm = 10;
+  static const double radiusMd = 16;
+  static const double radiusLg = 20;
+  static const double radiusXl = 28;
+
+  static const double titleSize = 17;
+  static const double tabSize = 15;
+  static const double chipHeight = 42;
+
+  static const double cardRailHeight = 198;
+  static const double cardRailWidth = 170;
+  static const double promotedHeight = 200;
+
+  static const double nowPlayingMainButton = 84;
+  static const double nowPlayingMainIcon = 46;
+}
+
 class SleepWellState extends ChangeNotifier {
   SleepWellState({
     SleepWellApi? api,
@@ -1419,7 +1443,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final pages = [
       HomeHubPage(state: widget.state),
       PlayerPage(state: widget.state),
-      SleepNowPage(state: widget.state),
+      RoutinePage(state: widget.state),
       InsightsPage(state: widget.state),
       SavedPage(state: widget.state),
     ];
@@ -1441,20 +1465,24 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
-          Column(
-            children: [
-              if (widget.state.lastError != null)
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(10),
-                  color: Colors.orange.withValues(alpha: 0.2),
-                  child: Text(
-                    widget.state.lastError!,
-                    style: const TextStyle(fontSize: 12),
+          SafeArea(
+            top: true,
+            bottom: false,
+            child: Column(
+              children: [
+                if (widget.state.lastError != null)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    color: Colors.orange.withValues(alpha: 0.2),
+                    child: Text(
+                      widget.state.lastError!,
+                      style: const TextStyle(fontSize: 12),
+                    ),
                   ),
-                ),
-              Expanded(child: pages[index]),
-            ],
+                Expanded(child: pages[index]),
+              ],
+            ),
           ),
           if (widget.state.selectedTrack != null)
             Positioned(
@@ -2248,6 +2276,428 @@ class SavedPage extends StatelessWidget {
   }
 }
 
+class RoutinePage extends StatefulWidget {
+  const RoutinePage({super.key, required this.state});
+  final SleepWellState state;
+
+  @override
+  State<RoutinePage> createState() => _RoutinePageState();
+}
+
+class _RoutinePageState extends State<RoutinePage> {
+  bool _trackSleepEnabled = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = widget.state;
+    final habits = state.sectionByKey('routine_habits');
+    final windDown = state.sectionByKey('routine_wind_down');
+    final sleep = state.sectionByKey('routine_sleep');
+    final recommendation = state.sectionByKey('routine_recommendation');
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0xFF2D2DB2), Color(0xFF111536), Color(0xFF171A3F)],
+              ),
+            ),
+          ),
+        ),
+        ListView(
+          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 180),
+          children: [
+            Row(
+              children: [
+                IconButton(onPressed: () {}, icon: const Icon(Icons.close)),
+                const Spacer(),
+                const Text('Routine Mar 28', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                const Spacer(),
+                TextButton(onPressed: () {}, child: const Text('Edit')),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: _alarmTile(
+                    label: 'Bedtime Reminder',
+                    time: _formatTimeOfDay(state.bedtimeTime),
+                    enabled: state.bedtimeRoutineEnabled,
+                    onTap: () async {
+                      final picked = await showTimePicker(context: context, initialTime: state.bedtimeTime);
+                      if (picked != null) {
+                        state.setBedtimeTime(picked);
+                        state.setBedtimeRoutineEnabled(true);
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(width: 1, height: 56, color: Colors.white24),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _alarmTile(
+                    label: 'Wake Up Alarm',
+                    time: '08:00',
+                    enabled: false,
+                    onTap: () {},
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 44,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: 6,
+                separatorBuilder: (_, __) => const SizedBox(width: 14),
+                itemBuilder: (_, idx) {
+                  final day = 22 + idx;
+                  final selected = day == 28;
+                  return Container(
+                    width: 42,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: selected ? Border.all(color: Colors.white, width: 3) : null,
+                      color: selected ? Colors.transparent : Colors.white.withValues(alpha: 0.06),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text('$day', style: const TextStyle(fontWeight: FontWeight.w700)),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            _routineSection(
+              title: habits?.title ?? 'HABITS',
+              child: _noticeCard(habits?.items.first.title ?? "You don't have any habits. Tap the plus to add one."),
+            ),
+            const SizedBox(height: 8),
+            _routineSectionWithTimeline(
+              title: windDown?.title ?? 'WIND DOWN',
+              timelineHeight: 116,
+              child: Column(
+                children: [
+                  _trackCard(
+                    title: windDown?.items.first.title ?? 'Dropping into the Present Moment',
+                    subtitle: windDown?.items.first.subtitle ?? 'Meditation • 14 min',
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            _routineSectionWithTimeline(
+              title: sleep?.title ?? 'SLEEP',
+              timelineHeight: 170,
+              child: Column(
+                children: [
+                  _trackSleepCard(
+                    title: sleep?.items.first.title ?? 'Track your sleep',
+                    subtitle: sleep?.items.first.subtitle ?? 'Tap to learn more info.',
+                    enabled: _trackSleepEnabled,
+                    onChanged: (v) => setState(() => _trackSleepEnabled = v),
+                  ),
+                  const SizedBox(height: 10),
+                  _trackCard(
+                    title: sleep != null && sleep.items.length > 1 ? sleep.items[1].title : 'Night Wind',
+                    subtitle: sleep != null && sleep.items.length > 1 ? sleep.items[1].subtitle ?? '' : 'Mix • 1 h 0 min',
+                  ),
+                ],
+              ),
+            ),
+            if (recommendation != null && recommendation.items.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              const Divider(color: Colors.white24, indent: 48, endIndent: 48, height: 24),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(18),
+                  gradient: const LinearGradient(colors: [Color(0xFF21367A), Color(0xFF2C2E65)]),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      recommendation.items.first.title,
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(recommendation.items.first.subtitle ?? '', style: const TextStyle(color: Colors.white70)),
+                    const SizedBox(height: 12),
+                    FilledButton.tonal(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white.withValues(alpha: 0.15),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                      ),
+                      onPressed: () {},
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(recommendation.items.first.ctaLabel ?? 'Explore more'),
+                          const SizedBox(width: 6),
+                          const Icon(Icons.chevron_right_rounded),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 14),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: Colors.black,
+                minimumSize: const Size(double.infinity, 58),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+              ),
+              onPressed: () async {
+                await state.startSleepNow();
+              },
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text('Start Routine', style: TextStyle(fontWeight: FontWeight.w800)),
+                  SizedBox(width: 8),
+                  Icon(Icons.play_arrow_rounded),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _alarmTile({
+    required String label,
+    required String time,
+    required bool enabled,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: Column(
+        children: [
+          Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 2),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.edit, size: 12, color: Colors.white70),
+              const SizedBox(width: 4),
+              Text(time, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+            ],
+          ),
+          Text(enabled ? 'Enabled' : 'Tap to enable', style: const TextStyle(color: Colors.white60)),
+        ],
+      ),
+    );
+  }
+
+  Widget _routineSection({required String title, required Widget child}) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _routineHeader(title),
+        const SizedBox(height: 8),
+        child,
+      ],
+    );
+  }
+
+  Widget _routineSectionWithTimeline({
+    required String title,
+    required Widget child,
+    required double timelineHeight,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _routineHeader(title),
+        const SizedBox(height: 8),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 16,
+              child: Column(
+                children: [
+                  _dashedSegment(10),
+                  const SizedBox(height: 4),
+                  _timelineDot(filled: true),
+                  const SizedBox(height: 4),
+                  _dashedSegment(timelineHeight * 0.42),
+                  const SizedBox(height: 4),
+                  _timelineDot(filled: false),
+                  const SizedBox(height: 4),
+                  _dashedSegment(timelineHeight * 0.46),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(child: child),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _routineHeader(String title) {
+    return Row(
+      children: [
+        Text('• $title', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+        const Spacer(),
+        CircleAvatar(
+          radius: 15,
+          backgroundColor: Colors.white.withValues(alpha: 0.1),
+          child: const Icon(Icons.add, size: 16),
+        ),
+      ],
+    );
+  }
+
+  Widget _timelineDot({required bool filled}) {
+    return Container(
+      width: 7,
+      height: 7,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: filled ? Colors.white70 : Colors.transparent,
+        border: Border.all(color: Colors.white54, width: 1),
+      ),
+    );
+  }
+
+  Widget _dashedSegment(double height) {
+    final bars = max(1, (height / 7).floor());
+    return SizedBox(
+      height: height,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: List.generate(
+          bars,
+          (_) => Container(width: 2, height: 3, color: Colors.white24),
+        ),
+      ),
+    );
+  }
+
+  Widget _noticeCard(String text) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: Colors.white.withValues(alpha: 0.07),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              color: Colors.white.withValues(alpha: 0.12),
+            ),
+            alignment: Alignment.center,
+            child: const Icon(Icons.spa_rounded),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(text, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _trackCard({required String title, required String subtitle}) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: Colors.black.withValues(alpha: 0.23),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 62,
+            height: 62,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              color: Colors.blueGrey.withValues(alpha: 0.35),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                Text(subtitle, style: const TextStyle(color: Colors.white70)),
+              ],
+            ),
+          ),
+          const Icon(Icons.more_horiz_rounded, size: 30),
+        ],
+      ),
+    );
+  }
+
+  Widget _trackSleepCard({
+    required String title,
+    required String subtitle,
+    required bool enabled,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: Colors.white.withValues(alpha: 0.08),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 5,
+            height: 48,
+            decoration: BoxDecoration(
+              color: const Color(0xFFA071FF),
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                    const SizedBox(width: 6),
+                    const CircleAvatar(radius: 8, child: Icon(Icons.info_outline, size: 12)),
+                  ],
+                ),
+                Text(subtitle, style: const TextStyle(color: Colors.white70)),
+              ],
+            ),
+          ),
+          Switch(value: enabled, onChanged: onChanged),
+        ],
+      ),
+    );
+  }
+}
+
 class SleepNowPage extends StatelessWidget {
   const SleepNowPage({super.key, required this.state});
   final SleepWellState state;
@@ -2341,6 +2791,7 @@ class PlayerPage extends StatefulWidget {
 class _PlayerPageState extends State<PlayerPage> {
   int _tabIndex = 0;
   int _chipIndex = 0;
+  int _promotedIndex = 0;
   final List<String> _tabs = const <String>['Sounds', 'Music', 'Mixes', 'Meditations', 'SleepTales'];
 
   static const Map<String, List<String>> _filters = <String, List<String>>{
@@ -2359,10 +2810,15 @@ class _PlayerPageState extends State<PlayerPage> {
     final sections = _sectionsForTab(tab);
     return ListView(
       physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
-      padding: const EdgeInsets.fromLTRB(16, 18, 16, 180),
+      padding: const EdgeInsets.fromLTRB(
+        _UiBaseline.pageHorizontal,
+        _UiBaseline.pageTop,
+        _UiBaseline.pageHorizontal,
+        _UiBaseline.pageBottomInset,
+      ),
       children: [
         SizedBox(
-          height: 48,
+          height: 50,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemBuilder: (_, i) {
@@ -2379,16 +2835,17 @@ class _PlayerPageState extends State<PlayerPage> {
                       Text(
                         _tabs[i],
                         style: TextStyle(
-                          fontSize: 42,
+                          fontSize: _UiBaseline.tabSize,
                           color: selected ? Colors.white : Colors.white38,
                           fontWeight: FontWeight.w700,
+                          letterSpacing: 0.1,
                         ),
                       ),
                       AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
-                        margin: const EdgeInsets.only(top: 2),
-                        height: 3,
-                        width: selected ? 44 : 0,
+                        margin: const EdgeInsets.only(top: 4),
+                        height: 2.6,
+                        width: selected ? 42 : 0,
                         decoration: BoxDecoration(
                           color: Colors.white,
                           borderRadius: BorderRadius.circular(999),
@@ -2406,7 +2863,7 @@ class _PlayerPageState extends State<PlayerPage> {
         const SizedBox(height: 14),
         if (chips.isNotEmpty)
           SizedBox(
-            height: 44,
+            height: _UiBaseline.chipHeight,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemBuilder: (_, i) {
@@ -2415,14 +2872,20 @@ class _PlayerPageState extends State<PlayerPage> {
                   borderRadius: BorderRadius.circular(999),
                   onTap: () => setState(() => _chipIndex = i),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    padding: const EdgeInsets.symmetric(horizontal: 15),
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(999),
-                      border: Border.all(color: selected ? Colors.white54 : Colors.white24),
-                      color: Colors.white.withValues(alpha: selected ? 0.15 : 0.04),
+                      border: Border.all(color: selected ? Colors.white38 : Colors.white24),
+                      color: Colors.white.withValues(alpha: selected ? 0.11 : 0.02),
                     ),
                     alignment: Alignment.center,
-                    child: Text(chips[i], style: const TextStyle(fontWeight: FontWeight.w700)),
+                    child: Text(
+                      chips[i],
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: selected ? Colors.white : Colors.white70,
+                      ),
+                    ),
                   ),
                 );
               },
@@ -2431,13 +2894,16 @@ class _PlayerPageState extends State<PlayerPage> {
             ),
           ),
         if (promoted != null && promoted.items.isNotEmpty) ...[
-          const SizedBox(height: 18),
-          Text(promoted.title ?? 'Promoted content', style: const TextStyle(fontSize: 31, fontWeight: FontWeight.w700)),
+          const SizedBox(height: _UiBaseline.sectionGap),
+          Text(
+            promoted.title ?? 'Promoted content',
+            style: const TextStyle(fontSize: _UiBaseline.titleSize, fontWeight: FontWeight.w700),
+          ),
           const SizedBox(height: 10),
           SizedBox(
-            height: 200,
+            height: _UiBaseline.promotedHeight,
             child: PageView.builder(
-              controller: PageController(viewportFraction: 0.96),
+              onPageChanged: (value) => setState(() => _promotedIndex = value),
               itemCount: promoted.items.length,
               itemBuilder: (_, i) => Padding(
                 padding: const EdgeInsets.only(right: 10),
@@ -2445,8 +2911,67 @@ class _PlayerPageState extends State<PlayerPage> {
               ),
             ),
           ),
+          if (promoted.items.length > 1) ...[
+            const SizedBox(height: 8),
+            Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: List.generate(promoted.items.length, (i) {
+                  final active = i == _promotedIndex;
+                  return AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    width: active ? 18 : 6,
+                    height: 6,
+                    margin: const EdgeInsets.symmetric(horizontal: 3),
+                    decoration: BoxDecoration(
+                      color: active ? Colors.white : Colors.white30,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  );
+                }),
+              ),
+            ),
+          ],
+          if (tab == 'Meditations' || tab == 'SleepTales') ...[
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 38,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: 8,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (_, idx) => Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: Colors.white24),
+                    color: Colors.black.withValues(alpha: 0.18),
+                  ),
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 11,
+                        backgroundColor: Colors.white.withValues(alpha: 0.2),
+                        child: Text(
+                          String.fromCharCode(65 + idx),
+                          style: const TextStyle(fontSize: 10, color: Colors.white),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        tab == 'Meditations'
+                            ? ['Nicky', 'Dr. Ryan', 'Dr. Liz', 'Michelle', 'Lauren', 'Andrew', 'Aster', 'Dave'][idx]
+                            : ['Christine', 'Drew', 'Aster', 'Dave', 'Lisa', 'Victoria', 'Shogo', 'Mia'][idx],
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ],
-        const SizedBox(height: 18),
+        const SizedBox(height: _UiBaseline.sectionGap),
         ...sections.map((section) => _sectionBlock(section)),
       ],
     );
@@ -2508,36 +3033,65 @@ class _PlayerPageState extends State<PlayerPage> {
       borderRadius: BorderRadius.circular(20),
       onTap: () => _openTrack(item.title),
       child: Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(_UiBaseline.radiusLg),
           gradient: const LinearGradient(
             colors: [Color(0xFF434D8F), Color(0xFF2C345C)],
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
           ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Row(
           children: [
-            const Row(
-              children: [
-                Icon(Icons.videocam_outlined, size: 16),
-                SizedBox(width: 6),
-                Text('Video'),
-              ],
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.videocam_outlined, size: 16),
+                      SizedBox(width: 6),
+                      Text('Video'),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(item.title, maxLines: 4, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                  const Spacer(),
+                  Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 12,
+                        backgroundColor: Colors.white.withValues(alpha: 0.3),
+                        child: const Icon(Icons.person, size: 14),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          item.subtitle ?? 'by SleepWell',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 8),
-            Text(item.title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-            const Spacer(),
-            if ((item.subtitle ?? '').isNotEmpty) Text(item.subtitle!, style: const TextStyle(color: Colors.white70)),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.bottomRight,
-              child: CircleAvatar(
-                radius: 26,
-                backgroundColor: Colors.white,
-                child: const Icon(Icons.play_arrow, color: Colors.black),
+            const SizedBox(width: 12),
+            Container(
+              width: 110,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(_UiBaseline.radiusMd),
+                color: Colors.white.withValues(alpha: 0.1),
+              ),
+              child: Center(
+                child: CircleAvatar(
+                  radius: 22,
+                  backgroundColor: Colors.white,
+                  child: const Icon(Icons.play_arrow, color: Colors.black),
+                ),
               ),
             ),
           ],
@@ -2550,13 +3104,15 @@ class _PlayerPageState extends State<PlayerPage> {
     final items = section.items;
     final isGrid = section.sectionType == 'grid';
     final isChips = section.sectionType == 'chips';
+    final tab = _tabs[_tabIndex];
+    final isSoundsGrid = tab == 'Sounds' && isGrid;
     return Padding(
       padding: const EdgeInsets.only(bottom: 22),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if ((section.title ?? '').isNotEmpty)
-            Text(section.title!, style: const TextStyle(fontSize: 31, fontWeight: FontWeight.w700)),
+            Text(section.title!, style: const TextStyle(fontSize: _UiBaseline.titleSize, fontWeight: FontWeight.w700)),
           if ((section.subtitle ?? '').isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4, bottom: 10),
@@ -2566,11 +3122,11 @@ class _PlayerPageState extends State<PlayerPage> {
             GridView.builder(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: isSoundsGrid ? 4 : 3,
                 crossAxisSpacing: 10,
                 mainAxisSpacing: 12,
-                childAspectRatio: 0.78,
+                childAspectRatio: isSoundsGrid ? 0.72 : 0.78,
               ),
               itemCount: items.length,
               itemBuilder: (_, i) {
@@ -2584,8 +3140,12 @@ class _PlayerPageState extends State<PlayerPage> {
                       Expanded(
                         child: Container(
                           decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(16),
-                            gradient: const LinearGradient(colors: [Color(0xFFDFB877), Color(0xFFCCA86C)]),
+                            borderRadius: BorderRadius.circular(_UiBaseline.radiusMd),
+                            gradient: LinearGradient(
+                              colors: isSoundsGrid
+                                  ? const [Color(0xFFE4BF86), Color(0xFFD2A763)]
+                                  : const [Color(0xFFDFB877), Color(0xFFCCA86C)],
+                            ),
                           ),
                           alignment: Alignment.center,
                           child: const Icon(Icons.graphic_eq_rounded, color: Color(0xFF3B2A19)),
@@ -2616,7 +3176,7 @@ class _PlayerPageState extends State<PlayerPage> {
                               height: 40,
                               decoration: BoxDecoration(
                                 color: Colors.white.withValues(alpha: 0.12),
-                                borderRadius: BorderRadius.circular(10),
+                                borderRadius: BorderRadius.circular(_UiBaseline.radiusSm),
                               ),
                               child: const Icon(Icons.graphic_eq_rounded, size: 20),
                             ),
@@ -2639,7 +3199,7 @@ class _PlayerPageState extends State<PlayerPage> {
             )
           else
             SizedBox(
-              height: 220,
+              height: _UiBaseline.cardRailHeight,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 physics: const BouncingScrollPhysics(),
@@ -2649,13 +3209,13 @@ class _PlayerPageState extends State<PlayerPage> {
                     borderRadius: BorderRadius.circular(16),
                     onTap: () => _openTrack(item.title),
                     child: SizedBox(
-                      width: 240,
+                      width: _UiBaseline.cardRailWidth,
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Expanded(
                             child: ClipRRect(
-                              borderRadius: BorderRadius.circular(16),
+                              borderRadius: BorderRadius.circular(_UiBaseline.radiusMd),
                               child: Container(
                                 color: Colors.white.withValues(alpha: 0.08),
                                 child: item.imageUrl == null
@@ -2670,7 +3230,7 @@ class _PlayerPageState extends State<PlayerPage> {
                             ),
                           ),
                           const SizedBox(height: 8),
-                          Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w700)),
+                          Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                           Text(item.subtitle ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70)),
                         ],
                       ),
@@ -2739,7 +3299,12 @@ class _TrackDetailPageState extends State<TrackDetailPage> {
           ),
           SafeArea(
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
+              padding: const EdgeInsets.fromLTRB(
+                _UiBaseline.pageHorizontal + 2,
+                10,
+                _UiBaseline.pageHorizontal + 2,
+                24,
+              ),
               children: [
                 Row(
                   children: [
@@ -2752,25 +3317,56 @@ class _TrackDetailPageState extends State<TrackDetailPage> {
                     const Icon(Icons.add),
                   ],
                 ),
-                const SizedBox(height: 8),
-                Text(widget.track.title, style: const TextStyle(fontSize: 56, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 6),
+                Container(
+                  height: 250,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(_UiBaseline.radiusLg),
+                    gradient: const LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0xFF21A9A7), Color(0xFF0F2C42)],
+                    ),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        const Spacer(),
+                        Text(
+                          widget.track.title,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                        ),
+                        const SizedBox(height: 14),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton(
+                            style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+                            onPressed: () async {
+                              await widget.state.playTrack(widget.track);
+                              if (!context.mounted) {
+                                return;
+                              }
+                              Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => NowPlayingPage(state: widget.state, track: widget.track),
+                                ),
+                              );
+                            },
+                            child: const Text('Play', style: TextStyle(fontWeight: FontWeight.w700)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
-                  child: FilledButton(
-                    style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
-                    onPressed: () async {
-                      await widget.state.playTrack(widget.track);
-                      if (!context.mounted) {
-                        return;
-                      }
-                      Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => NowPlayingPage(state: widget.state, track: widget.track),
-                        ),
-                      );
-                    },
-                    child: const Text('Play'),
+                  child: Text(
+                    widget.track.title,
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -2793,7 +3389,7 @@ class _TrackDetailPageState extends State<TrackDetailPage> {
                   spacing: 8,
                   runSpacing: 8,
                   children: const ['Deep Sleep', 'With Sound', 'Bored', 'Bedtime', 'Fall Asleep', 'Hypnosis', 'Sleep']
-                      .map((label) => Chip(label: Text(label)))
+                      .map((label) => Chip(label: Text(label, style: TextStyle(fontWeight: FontWeight.w600))))
                       .toList(),
                 ),
                 const SizedBox(height: 14),
@@ -2893,6 +3489,11 @@ class NowPlayingPage extends StatelessWidget {
                       IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.keyboard_arrow_down)),
                       const Spacer(),
                       FilledButton.tonal(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.white.withValues(alpha: 0.14),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                        ),
                         onPressed: () async {
                           await state.stopPlayback();
                           if (context.mounted) {
@@ -2904,17 +3505,44 @@ class NowPlayingPage extends StatelessWidget {
                     ],
                   ),
                 ),
-                const Spacer(),
+                Container(
+                  height: 200,
+                  margin: const EdgeInsets.symmetric(horizontal: _UiBaseline.pageHorizontal),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(_UiBaseline.radiusLg),
+                    gradient: const LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0xFF2BBAB6), Color(0xFF142E45)],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(track.title, style: const TextStyle(fontSize: 44, fontWeight: FontWeight.w800)),
+                      Text(track.title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                       const SizedBox(height: 4),
                       const Text('Narrated by Aster J. Haile', style: TextStyle(color: Colors.white70)),
                       const SizedBox(height: 8),
-                      Slider(value: positionMs, min: 0, max: duration.inMilliseconds.toDouble(), onChanged: (_) {}),
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 5.5,
+                          activeTrackColor: const Color(0xFFB9A7FF),
+                          inactiveTrackColor: Colors.white24,
+                          thumbColor: Colors.white,
+                          overlayColor: Colors.white24,
+                          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                        ),
+                        child: Slider(
+                          value: positionMs,
+                          min: 0,
+                          max: duration.inMilliseconds.toDouble(),
+                          onChanged: (_) {},
+                        ),
+                      ),
                       Row(
                         children: [
                           Text(_formatDuration(state.currentPosition), style: const TextStyle(color: Colors.white70)),
@@ -2922,29 +3550,38 @@ class NowPlayingPage extends StatelessWidget {
                           Text(_formatDuration(duration), style: const TextStyle(color: Colors.white70)),
                         ],
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 6),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
-                          const Icon(Icons.more_horiz),
-                          const Icon(Icons.skip_previous_rounded, color: Colors.white38),
+                          const Icon(Icons.more_horiz, size: 30),
+                          const Icon(Icons.skip_previous_rounded, color: Colors.white38, size: 34),
                           IconButton(
-                            iconSize: 72,
+                            iconSize: _UiBaseline.nowPlayingMainButton,
                             icon: CircleAvatar(
-                              radius: 36,
+                              radius: _UiBaseline.nowPlayingMainButton / 2,
                               backgroundColor: Colors.white,
-                              child: Icon(state.isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.black, size: 42),
+                              child: Icon(
+                                state.isPlaying ? Icons.pause : Icons.play_arrow,
+                                color: Colors.black,
+                                size: _UiBaseline.nowPlayingMainIcon,
+                              ),
                             ),
                             onPressed: () async => state.togglePlayPause(),
                           ),
-                          const Icon(Icons.skip_next_rounded),
-                          const Icon(Icons.favorite_border_rounded),
+                          const Icon(Icons.skip_next_rounded, size: 34),
+                          const Icon(Icons.favorite_border_rounded, size: 30),
                         ],
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 10),
                       Center(
                         child: FilledButton(
-                          style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            foregroundColor: Colors.black,
+                            minimumSize: const Size(220, 50),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                          ),
                           onPressed: () {},
                           child: const Text('Track My Sleep'),
                         ),
@@ -2952,13 +3589,13 @@ class NowPlayingPage extends StatelessWidget {
                     ],
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(16),
                   decoration: const BoxDecoration(
                     color: Color(0xFF1B2442),
-                    borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+                    borderRadius: BorderRadius.vertical(top: Radius.circular(_UiBaseline.radiusXl)),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -3007,7 +3644,15 @@ class NowPlayingPage extends StatelessWidget {
               ],
             ),
           ),
-          FilledButton.tonal(onPressed: () {}, child: Text(button)),
+          FilledButton.tonal(
+            style: FilledButton.styleFrom(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+              backgroundColor: Colors.white.withValues(alpha: 0.14),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () {},
+            child: Text(button),
+          ),
         ],
       ),
     );
@@ -3731,6 +4376,47 @@ const List<HomeSectionContent> _fallbackHomeSections = <HomeSectionContent>[
     items: <HomeItemContent>[
       HomeItemContent(title: '2 a.m. at the Blueberry Hill Diner', subtitle: 'SleepTale • 26 min'),
       HomeItemContent(title: 'Camping at Moonlit Lake', subtitle: 'SleepTale • 28 min'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'routine_habits',
+    title: 'HABITS',
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(title: "You don't have any habits. Tap the plus to add one."),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'routine_wind_down',
+    title: 'WIND DOWN',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Dropping into the Present Moment', subtitle: 'Meditation • 14 min'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'routine_sleep',
+    title: 'SLEEP',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Track your sleep', subtitle: 'Tap to learn more info.', meta: <String, dynamic>{'toggle': true}),
+      HomeItemContent(title: 'Night Wind', subtitle: 'Mix • 1 h 0 min'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'routine_recommendation',
+    title: null,
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'Want to try a different routine?',
+        subtitle: 'Select a new routine and customize it to suit your sleep needs',
+        ctaLabel: 'Explore more',
+      ),
     ],
   ),
 ];
