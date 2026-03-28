@@ -106,6 +106,7 @@ class SleepWellState extends ChangeNotifier {
   List<MixPreset> mixerPresets = <MixPreset>[];
 
   bool isPlaying = false;
+  bool enableMixerInSleepNow = true;
   bool loop = true;
   int sleepTimerMinutes = 30;
   Duration currentPosition = Duration.zero;
@@ -241,6 +242,9 @@ class SleepWellState extends ChangeNotifier {
 
     await _startSession(mode: 'sleep_now', entryPoint: 'sleep_now_button');
     await _playSelectedTrack();
+    if (enableMixerInSleepNow && !isMixerPlaying) {
+      await toggleMixerPlayback();
+    }
     sessions.add(SleepSession(DateTime.now(), 0));
     isBusy = false;
     notifyListeners();
@@ -258,6 +262,9 @@ class SleepWellState extends ChangeNotifier {
 
   Future<void> stopPlayback() async {
     await _fadeOutAndStop();
+    if (isMixerPlaying) {
+      await toggleMixerPlayback();
+    }
     isPlaying = false;
     await _cancelSleepTimer();
     currentPosition = Duration.zero;
@@ -400,6 +407,11 @@ class SleepWellState extends ChangeNotifier {
       await _player.setLoopMode(enabled ? LoopMode.one : LoopMode.off);
     }
     await _logEvent(enabled ? 'repeat_on' : 'repeat_off');
+    notifyListeners();
+  }
+
+  void setSleepNowMixerEnabled(bool enabled) {
+    enableMixerInSleepNow = enabled;
     notifyListeners();
   }
 
@@ -822,6 +834,15 @@ class SleepNowPage extends StatelessWidget {
             const Text(
               'Personalized sequence, fade-out enabled, low light mode.',
               textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 14),
+            SwitchListTile(
+              title: const Text('Include ambient mixer'),
+              subtitle: const Text('Auto-layer rain/wind/white-noise with Sleep Now'),
+              value: state.enableMixerInSleepNow,
+              onChanged: (value) {
+                state.setSleepNowMixerEnabled(value);
+              },
             ),
             const SizedBox(height: 22),
             SizedBox(

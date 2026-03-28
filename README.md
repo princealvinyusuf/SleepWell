@@ -8,6 +8,7 @@ The product is fully free at this stage and optimized to collect behavioral sign
 - Flutter MVP app flow in `lib/main.dart`
   - Personalization onboarding
   - One-tap `Sleep Now` mode
+  - Combined `Sleep Now + Mixer` option (single tap can start primary track + ambient layers)
   - Smart player UI (categories, loop, timer, fade-out action)
   - Real `just_audio` playback (play/pause, progress, loop, sleep timer fade-out)
   - Background playback notification support (`just_audio_background`)
