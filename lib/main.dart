@@ -1,20 +1,46 @@
+import 'dart:convert';
+import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:just_audio_background/just_audio_background.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await JustAudioBackground.init(
+    androidNotificationChannelId: 'com.sleepwell.audio',
+    androidNotificationChannelName: 'SleepWell Playback',
+    androidNotificationOngoing: true,
+  );
   runApp(const SleepWellApp());
 }
 
 class SleepWellApp extends StatefulWidget {
-  const SleepWellApp({super.key});
+  const SleepWellApp({super.key, this.enableAudio = true});
+
+  final bool enableAudio;
 
   @override
   State<SleepWellApp> createState() => _SleepWellAppState();
 }
 
 class _SleepWellAppState extends State<SleepWellApp> {
-  final _state = SleepWellState();
+  late final SleepWellState _state;
+
+  @override
+  void initState() {
+    super.initState();
+    _state = SleepWellState(enableAudio: widget.enableAudio);
+    _state.bootstrap();
+  }
+
+  @override
+  void dispose() {
+    _state.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -45,6 +71,25 @@ class _SleepWellAppState extends State<SleepWellApp> {
 }
 
 class SleepWellState extends ChangeNotifier {
+  SleepWellState({
+    SleepWellApi? api,
+    bool enableAudio = true,
+  })  : _api = api ?? SleepWellApi(),
+        _enableAudio = enableAudio;
+
+  final SleepWellApi _api;
+  final bool _enableAudio;
+  final AudioPlayer _player = AudioPlayer();
+  StreamSubscription<Duration>? _positionSubscription;
+  StreamSubscription<PlayerState>? _playerStateSubscription;
+  Timer? _sleepTimer;
+
+  bool isBootstrapping = true;
+  bool isBusy = false;
+  bool apiConnected = false;
+  String? lastError;
+  final String deviceId = SleepWellApi.defaultDeviceId;
+
   bool isOnboarded = false;
   bool prefersTalking = false;
   int sleepDifficulty = 3;
@@ -60,21 +105,81 @@ class SleepWellState extends ChangeNotifier {
   bool isPlaying = false;
   bool loop = true;
   int sleepTimerMinutes = 30;
+  Duration currentPosition = Duration.zero;
+  Duration currentDuration = Duration.zero;
   SleepTrack? selectedTrack;
+  int? _activeSessionId;
+  DateTime? _sessionStartedAt;
+  SleepInsights insights = const SleepInsights(
+    usageFrequencyLast7Days: 0,
+    consistencyScore: 0,
+    averageDurationMinutes: 0,
+  );
 
-  final List<SleepTrack> tracks = <SleepTrack>[
-    SleepTrack('Moonlight Whispers', 'whisper', true),
-    SleepTrack('Forest Rain Deep Sleep', 'rain', false),
-    SleepTrack('No Talking Brown Noise', 'no_talking', false),
-    SleepTrack('Night Spa Roleplay', 'roleplay', true),
+  List<SleepTrack> tracks = <SleepTrack>[
+    const SleepTrack(
+      title: 'Moonlight Whispers',
+      category: 'whisper',
+      talking: true,
+      streamUrl: _fallbackAudioUrl,
+      durationSeconds: 3600,
+    ),
+    const SleepTrack(
+      title: 'Forest Rain Deep Sleep',
+      category: 'rain',
+      talking: false,
+      streamUrl: _fallbackAudioUrl,
+      durationSeconds: 3600,
+    ),
+    const SleepTrack(
+      title: 'No Talking Brown Noise',
+      category: 'no_talking',
+      talking: false,
+      streamUrl: _fallbackAudioUrl,
+      durationSeconds: 3600,
+    ),
+    const SleepTrack(
+      title: 'Night Spa Roleplay',
+      category: 'roleplay',
+      talking: true,
+      streamUrl: _fallbackAudioUrl,
+      durationSeconds: 3600,
+    ),
   ];
 
-  void completeOnboarding({
+  Future<void> bootstrap() async {
+    isBootstrapping = true;
+    notifyListeners();
+    await _configureAudio();
+    await fetchCatalog();
+    await refreshInsights();
+    isBootstrapping = false;
+    notifyListeners();
+  }
+
+  Future<void> fetchCatalog() async {
+    try {
+      final catalog = await _api.fetchCatalog();
+      if (catalog.isNotEmpty) {
+        tracks = catalog;
+      }
+      apiConnected = true;
+      lastError = null;
+    } catch (_) {
+      // Keep local seed tracks when API is unavailable.
+      apiConnected = false;
+      lastError = 'Using offline catalog';
+    }
+    notifyListeners();
+  }
+
+  Future<void> completeOnboarding({
     required bool talking,
     required int difficulty,
     required List<String> categories,
     required List<String> soundTypes,
-  }) {
+  }) async {
+    isBusy = true;
     prefersTalking = talking;
     sleepDifficulty = difficulty;
     preferredCategories
@@ -85,28 +190,99 @@ class SleepWellState extends ChangeNotifier {
       ..addAll(soundTypes);
     isOnboarded = true;
     notifyListeners();
-  }
 
-  void startSleepNow() {
-    final filtered = tracks.where((t) {
-      final matchesTalking = t.talking == prefersTalking;
-      final matchesCategory =
-          preferredCategories.isEmpty || preferredCategories.contains(t.category);
-      return matchesTalking && matchesCategory;
-    }).toList();
-    final picked = filtered.isEmpty ? tracks : filtered;
-    selectedTrack = picked[Random().nextInt(picked.length)];
-    isPlaying = true;
-    sessions.add(SleepSession(DateTime.now(), 0));
+    try {
+      await _api.submitOnboarding(
+        deviceId: deviceId,
+        talking: talking,
+        difficulty: difficulty,
+        categories: categories,
+        soundTypes: soundTypes,
+      );
+      apiConnected = true;
+      lastError = null;
+    } catch (_) {
+      apiConnected = false;
+      lastError = 'Onboarding saved locally. API unavailable.';
+    }
+    isBusy = false;
     notifyListeners();
   }
 
-  void stopPlayback() {
+  Future<void> startSleepNow() async {
+    if (isBusy) {
+      return;
+    }
+    isBusy = true;
+    notifyListeners();
+
+    try {
+      final sequence = await _api.fetchSleepNowSequence(deviceId: deviceId);
+      final picked = sequence.isEmpty ? tracks : sequence;
+      selectedTrack = picked[Random().nextInt(picked.length)];
+      apiConnected = true;
+      lastError = null;
+    } catch (_) {
+      final filtered = tracks.where((t) {
+        final matchesTalking = t.talking == prefersTalking;
+        final matchesCategory =
+            preferredCategories.isEmpty || preferredCategories.contains(t.category);
+        return matchesTalking && matchesCategory;
+      }).toList();
+      final picked = filtered.isEmpty ? tracks : filtered;
+      selectedTrack = picked[Random().nextInt(picked.length)];
+      apiConnected = false;
+      lastError = 'Running Sleep Now in offline mode.';
+    }
+
+    await _startSession(mode: 'sleep_now', entryPoint: 'sleep_now_button');
+    await _playSelectedTrack();
+    sessions.add(SleepSession(DateTime.now(), 0));
+    isBusy = false;
+    notifyListeners();
+  }
+
+  Future<void> playTrack(SleepTrack track) async {
+    await _cancelSleepTimer();
+    selectedTrack = track;
+    sessions.add(SleepSession(DateTime.now(), 0));
+    await _startSession(mode: 'player', entryPoint: 'player_track_tap');
+    await _playSelectedTrack();
+    await _logEvent('play');
+    notifyListeners();
+  }
+
+  Future<void> stopPlayback() async {
+    await _fadeOutAndStop();
     isPlaying = false;
+    await _cancelSleepTimer();
+    currentPosition = Duration.zero;
+    final endedAt = DateTime.now();
+    if (_activeSessionId != null) {
+      try {
+        await _api.endSession(
+          sessionId: _activeSessionId!,
+          status: 'completed',
+          endedAt: endedAt,
+        );
+        apiConnected = true;
+      } catch (_) {
+        apiConnected = false;
+      }
+    }
     if (sessions.isNotEmpty) {
       final current = sessions.removeLast();
-      sessions.add(current.copyWith(durationMinutes: sleepTimerMinutes));
+      final computedMinutes = _sessionStartedAt == null
+          ? sleepTimerMinutes
+          : max(
+              1,
+              endedAt.difference(_sessionStartedAt!).inMinutes,
+            );
+      sessions.add(current.copyWith(durationMinutes: computedMinutes));
     }
+    _activeSessionId = null;
+    _sessionStartedAt = null;
+    await refreshInsights();
     notifyListeners();
   }
 
@@ -114,13 +290,231 @@ class SleepWellState extends ChangeNotifier {
     mixer[key] = value;
     notifyListeners();
   }
+
+  Future<void> setSleepTimerMinutes(int minutes) async {
+    sleepTimerMinutes = minutes;
+    if (isPlaying) {
+      await _scheduleSleepTimer();
+    }
+    await _logEvent('timer_set');
+    notifyListeners();
+  }
+
+  Future<void> setLoopEnabled(bool enabled) async {
+    loop = enabled;
+    if (_enableAudio) {
+      await _player.setLoopMode(enabled ? LoopMode.one : LoopMode.off);
+    }
+    await _logEvent(enabled ? 'repeat_on' : 'repeat_off');
+    notifyListeners();
+  }
+
+  Future<void> togglePlayPause() async {
+    if (!_enableAudio) {
+      return;
+    }
+    if (_player.playing) {
+      await _player.pause();
+      isPlaying = false;
+      await _logEvent('pause');
+    } else {
+      await _player.play();
+      isPlaying = true;
+      await _logEvent('resume');
+      await _scheduleSleepTimer();
+    }
+    notifyListeners();
+  }
+
+  Future<void> refreshInsights() async {
+    try {
+      insights = await _api.fetchInsights(deviceId: deviceId);
+      apiConnected = true;
+      lastError = null;
+    } catch (_) {
+      final localUsage = sessions.length;
+      final localConsistency = min(100, (localUsage / 7 * 100).round());
+      final localAvg = sessions.isEmpty
+          ? 0
+          : sessions.map((s) => s.durationMinutes).reduce((a, b) => a + b) ~/
+              sessions.length;
+      insights = SleepInsights(
+        usageFrequencyLast7Days: localUsage,
+        consistencyScore: localConsistency,
+        averageDurationMinutes: localAvg,
+      );
+      apiConnected = false;
+      lastError = 'Insights are currently local.';
+    }
+    notifyListeners();
+  }
+
+  Future<void> _startSession({
+    required String mode,
+    required String entryPoint,
+  }) async {
+    _sessionStartedAt = DateTime.now();
+    try {
+      _activeSessionId = await _api.startSession(
+        deviceId: deviceId,
+        mode: mode,
+        entryPoint: entryPoint,
+      );
+      apiConnected = true;
+    } catch (_) {
+      _activeSessionId = null;
+      apiConnected = false;
+    }
+  }
+
+  Future<void> _logEvent(String eventType) async {
+    if (_activeSessionId == null) {
+      return;
+    }
+    try {
+      await _api.addSessionEvent(
+        sessionId: _activeSessionId!,
+        eventType: eventType,
+        trackId: selectedTrack?.id,
+      );
+      apiConnected = true;
+    } catch (_) {
+      apiConnected = false;
+    }
+  }
+
+  Future<void> _configureAudio() async {
+    if (!_enableAudio) {
+      return;
+    }
+    await _player.setLoopMode(loop ? LoopMode.one : LoopMode.off);
+    _positionSubscription ??= _player.positionStream.listen((position) {
+      currentPosition = position;
+      notifyListeners();
+    });
+    _playerStateSubscription ??= _player.playerStateStream.listen((state) {
+      isPlaying = state.playing;
+      final duration = _player.duration;
+      if (duration != null) {
+        currentDuration = duration;
+      }
+      notifyListeners();
+    });
+  }
+
+  Future<void> _playSelectedTrack() async {
+    if (!_enableAudio || selectedTrack == null) {
+      isPlaying = true;
+      return;
+    }
+
+    final primaryUrl = selectedTrack!.streamUrl?.trim().isNotEmpty == true
+        ? selectedTrack!.streamUrl!.trim()
+        : _fallbackAudioUrl;
+
+    Future<void> playFromUrl(String url) async {
+      await _player.setAudioSource(
+        AudioSource.uri(
+          Uri.parse(url),
+          tag: MediaItem(
+            id: '${selectedTrack!.id ?? selectedTrack!.title}-$url',
+            title: selectedTrack!.title,
+            artist: 'SleepWell',
+          ),
+        ),
+      );
+      await _player.play();
+    }
+
+    try {
+      await playFromUrl(primaryUrl);
+      currentDuration = _player.duration ?? Duration.zero;
+      isPlaying = true;
+      await _scheduleSleepTimer();
+    } catch (_) {
+      if (primaryUrl == _fallbackAudioUrl) {
+        isPlaying = false;
+        lastError = 'Playback failed. Check your internet connection.';
+        notifyListeners();
+        return;
+      }
+      try {
+        await playFromUrl(_fallbackAudioUrl);
+        currentDuration = _player.duration ?? Duration.zero;
+        isPlaying = true;
+        lastError = 'Track URL unavailable, fallback audio playing.';
+        await _scheduleSleepTimer();
+      } catch (_) {
+        isPlaying = false;
+        lastError = 'Playback failed. Check your internet connection.';
+      }
+    }
+  }
+
+  Future<void> _scheduleSleepTimer() async {
+    await _cancelSleepTimer();
+    _sleepTimer = Timer(Duration(minutes: sleepTimerMinutes), () async {
+      await _logEvent('timer_completed');
+      await stopPlayback();
+    });
+  }
+
+  Future<void> _cancelSleepTimer() async {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+  }
+
+  Future<void> _fadeOutAndStop() async {
+    if (!_enableAudio) {
+      return;
+    }
+    final startVolume = _player.volume;
+    const steps = 12;
+    for (var i = steps; i >= 0; i--) {
+      await _player.setVolume(startVolume * (i / steps));
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+    }
+    await _player.stop();
+    await _player.setVolume(1.0);
+  }
+
+  @override
+  void dispose() {
+    _sleepTimer?.cancel();
+    _positionSubscription?.cancel();
+    _playerStateSubscription?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
 }
 
 class SleepTrack {
-  const SleepTrack(this.title, this.category, this.talking);
+  const SleepTrack({
+    this.id,
+    required this.title,
+    required this.category,
+    required this.talking,
+    this.streamUrl,
+    this.durationSeconds = 1800,
+  });
+
+  final int? id;
   final String title;
   final String category;
   final bool talking;
+  final String? streamUrl;
+  final int durationSeconds;
+
+  factory SleepTrack.fromJson(Map<String, dynamic> json) {
+    return SleepTrack(
+      id: json['id'] is int ? json['id'] as int : int.tryParse('${json['id']}'),
+      title: '${json['title'] ?? 'Untitled'}',
+      category: '${json['category'] ?? 'rain'}',
+      talking: json['talking'] == true || json['talking'] == 1,
+      streamUrl: json['stream_url']?.toString(),
+      durationSeconds: _toInt(json['duration_seconds']),
+    );
+  }
 }
 
 class SleepSession {
@@ -189,15 +583,19 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           ),
           const SizedBox(height: 20),
           FilledButton(
-            onPressed: () {
-              widget.state.completeOnboarding(
-                talking: talking,
-                difficulty: difficulty,
-                categories: categories.toList(),
-                soundTypes: soundTypes.toList(),
-              );
-            },
-            child: const Text('Start Sleeping Better'),
+            onPressed: widget.state.isBusy
+                ? null
+                : () async {
+                    await widget.state.completeOnboarding(
+                      talking: talking,
+                      difficulty: difficulty,
+                      categories: categories.toList(),
+                      soundTypes: soundTypes.toList(),
+                    );
+                  },
+            child: Text(
+              widget.state.isBusy ? 'Saving...' : 'Start Sleeping Better',
+            ),
           ),
         ],
       ),
@@ -257,7 +655,36 @@ class _HomeScreenState extends State<HomeScreen> {
       InsightsPage(state: widget.state),
     ];
     return Scaffold(
-      body: pages[index],
+      appBar: AppBar(
+        title: const Text('SleepWell'),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Chip(
+              label: Text(widget.state.apiConnected ? 'API Connected' : 'Offline Mode'),
+              backgroundColor: widget.state.apiConnected
+                  ? Colors.green.withValues(alpha: 0.2)
+                  : Colors.orange.withValues(alpha: 0.2),
+              side: BorderSide.none,
+            ),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          if (widget.state.lastError != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              color: Colors.orange.withValues(alpha: 0.2),
+              child: Text(
+                widget.state.lastError!,
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+          Expanded(child: pages[index]),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
         onDestinationSelected: (i) => setState(() => index = i),
@@ -278,6 +705,9 @@ class SleepNowPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (state.isBootstrapping) {
+      return const Center(child: CircularProgressIndicator());
+    }
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(20),
@@ -295,13 +725,18 @@ class SleepNowPage extends StatelessWidget {
               width: double.infinity,
               child: FilledButton.icon(
                 icon: const Icon(Icons.bedtime),
-                label: const Text('Sleep Now'),
-                onPressed: () {
-                  state.startSleepNow();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Playing: ${state.selectedTrack?.title ?? ''}')),
-                  );
-                },
+                label: Text(state.isBusy ? 'Preparing...' : 'Sleep Now'),
+                onPressed: state.isBusy
+                    ? null
+                    : () async {
+                        await state.startSleepNow();
+                        if (!context.mounted) {
+                          return;
+                        }
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Playing: ${state.selectedTrack?.title ?? ''}')),
+                        );
+                      },
               ),
             ),
           ],
@@ -317,11 +752,42 @@ class PlayerPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final duration = state.currentDuration.inMilliseconds <= 0
+        ? const Duration(seconds: 1)
+        : state.currentDuration;
+    final positionMillis = min(
+      state.currentPosition.inMilliseconds,
+      duration.inMilliseconds,
+    ).toDouble();
+
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         const Text('Smart ASMR Player', style: TextStyle(fontSize: 20)),
         const SizedBox(height: 12),
+        Card(
+          child: ListTile(
+            title: Text(state.selectedTrack?.title ?? 'No track selected'),
+            subtitle: Text(
+              '${_formatDuration(state.currentPosition)} / ${_formatDuration(duration)}',
+            ),
+            trailing: IconButton(
+              icon: Icon(state.isPlaying ? Icons.pause_circle : Icons.play_circle),
+              onPressed: state.selectedTrack == null
+                  ? null
+                  : () async {
+                      await state.togglePlayPause();
+                    },
+            ),
+          ),
+        ),
+        Slider(
+          value: positionMillis,
+          min: 0,
+          max: duration.inMilliseconds.toDouble(),
+          onChanged: (_) {},
+        ),
+        const SizedBox(height: 8),
         ...state.tracks.map(
           (track) => Card(
             child: ListTile(
@@ -329,11 +795,8 @@ class PlayerPage extends StatelessWidget {
               subtitle: Text('${track.category} • ${track.talking ? 'talking' : 'no talking'}'),
               trailing: IconButton(
                 icon: const Icon(Icons.play_arrow),
-                onPressed: () {
-                  state.selectedTrack = track;
-                  state.isPlaying = true;
-                  state.sessions.add(SleepSession(DateTime.now(), 0));
-                  state.notifyListeners();
+                onPressed: () async {
+                  await state.playTrack(track);
                 },
               ),
             ),
@@ -343,9 +806,8 @@ class PlayerPage extends StatelessWidget {
         SwitchListTile(
           title: const Text('Loop playback'),
           value: state.loop,
-          onChanged: (value) {
-            state.loop = value;
-            state.notifyListeners();
+          onChanged: (value) async {
+            await state.setLoopEnabled(value);
           },
         ),
         ListTile(
@@ -355,14 +817,17 @@ class PlayerPage extends StatelessWidget {
             min: 10,
             max: 90,
             divisions: 8,
-            onChanged: (v) {
-              state.sleepTimerMinutes = v.toInt();
-              state.notifyListeners();
+            onChanged: (v) async {
+              await state.setSleepTimerMinutes(v.toInt());
             },
           ),
         ),
         FilledButton.tonal(
-          onPressed: state.isPlaying ? state.stopPlayback : null,
+          onPressed: state.isPlaying
+              ? () async {
+                  await state.stopPlayback();
+                }
+              : null,
           child: const Text('Stop with fade-out'),
         ),
       ],
@@ -401,14 +866,6 @@ class InsightsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final sessions = state.sessions;
-    final usageFrequency = sessions.length;
-    final consistency = min(100, (usageFrequency / 7 * 100).round());
-    final avgDuration = sessions.isEmpty
-        ? 0
-        : sessions.map((s) => s.durationMinutes).reduce((a, b) => a + b) ~/
-            sessions.length;
-
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -417,22 +874,222 @@ class InsightsPage extends StatelessWidget {
         Card(
           child: ListTile(
             title: const Text('Usage frequency (7 days)'),
-            trailing: Text('$usageFrequency sessions'),
+            trailing: Text('${state.insights.usageFrequencyLast7Days} sessions'),
           ),
         ),
         Card(
           child: ListTile(
             title: const Text('Sleep consistency score'),
-            trailing: Text('$consistency/100'),
+            trailing: Text('${state.insights.consistencyScore}/100'),
           ),
         ),
         Card(
           child: ListTile(
             title: const Text('Average duration'),
-            trailing: Text('$avgDuration min'),
+            trailing: Text('${state.insights.averageDurationMinutes} min'),
           ),
+        ),
+        const SizedBox(height: 8),
+        FilledButton.tonal(
+          onPressed: () async {
+            await state.refreshInsights();
+          },
+          child: const Text('Refresh Insights'),
         ),
       ],
     );
   }
+}
+
+class SleepInsights {
+  const SleepInsights({
+    required this.usageFrequencyLast7Days,
+    required this.consistencyScore,
+    required this.averageDurationMinutes,
+  });
+
+  final int usageFrequencyLast7Days;
+  final int consistencyScore;
+  final int averageDurationMinutes;
+
+  factory SleepInsights.fromJson(Map<String, dynamic> json) {
+    return SleepInsights(
+      usageFrequencyLast7Days: _toInt(json['usage_frequency_last_7_days']),
+      consistencyScore: _toInt(json['consistency_score']),
+      averageDurationMinutes: _toInt(json['average_duration_minutes']),
+    );
+  }
+}
+
+const String _fallbackAudioUrl = 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3';
+
+class SleepWellApi {
+  static const String baseUrl = String.fromEnvironment(
+    'SLEEPWELL_API_BASE_URL',
+    defaultValue: 'http://127.0.0.1:8000/api/v1/sleepwell',
+  );
+
+  static String get defaultDeviceId {
+    final host = Platform.localHostname.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '');
+    return 'sleepwell-${Platform.operatingSystem.toLowerCase()}-$host';
+  }
+
+  Future<List<SleepTrack>> fetchCatalog() async {
+    final json = await _request('GET', '/catalog');
+    final tracksRaw = (json['tracks'] as List<dynamic>? ?? <dynamic>[]);
+    return tracksRaw
+        .whereType<Map<String, dynamic>>()
+        .map(SleepTrack.fromJson)
+        .toList();
+  }
+
+  Future<void> submitOnboarding({
+    required String deviceId,
+    required bool talking,
+    required int difficulty,
+    required List<String> categories,
+    required List<String> soundTypes,
+  }) async {
+    await _request(
+      'POST',
+      '/onboarding',
+      body: {
+        'device_id': deviceId,
+        'timezone': DateTime.now().timeZoneName,
+        'sleep_difficulty': difficulty,
+        'prefers_talking': talking,
+        'preferred_categories': categories,
+        'preferred_sound_types': soundTypes,
+      },
+    );
+  }
+
+  Future<List<SleepTrack>> fetchSleepNowSequence({
+    required String deviceId,
+  }) async {
+    final json = await _request(
+      'POST',
+      '/sleep-now',
+      body: {'device_id': deviceId},
+    );
+    final sequenceRaw = (json['sleep_now_sequence'] as List<dynamic>? ?? <dynamic>[]);
+    return sequenceRaw
+        .whereType<Map<String, dynamic>>()
+        .map(SleepTrack.fromJson)
+        .toList();
+  }
+
+  Future<int?> startSession({
+    required String deviceId,
+    required String mode,
+    required String entryPoint,
+  }) async {
+    final json = await _request(
+      'POST',
+      '/sessions/start',
+      body: {
+        'device_id': deviceId,
+        'mode': mode,
+        'entry_point': entryPoint,
+        'device_local_date': DateTime.now().toIso8601String().split('T').first,
+      },
+    );
+    return _nullableInt(json['session_id']);
+  }
+
+  Future<void> addSessionEvent({
+    required int sessionId,
+    required String eventType,
+    int? trackId,
+  }) async {
+    await _request(
+      'POST',
+      '/sessions/$sessionId/event',
+      body: {
+        'event_type': eventType,
+        'track_id': trackId,
+        'position_seconds': 0,
+        'metadata': {'source': 'flutter_mvp'},
+      },
+    );
+  }
+
+  Future<void> endSession({
+    required int sessionId,
+    required String status,
+    required DateTime endedAt,
+  }) async {
+    await _request(
+      'POST',
+      '/sessions/$sessionId/end',
+      body: {
+        'status': status,
+        'ended_at': endedAt.toIso8601String(),
+      },
+    );
+  }
+
+  Future<SleepInsights> fetchInsights({
+    required String deviceId,
+  }) async {
+    final json = await _request('GET', '/insights/$deviceId');
+    return SleepInsights.fromJson(json);
+  }
+
+  Future<Map<String, dynamic>> _request(
+    String method,
+    String path, {
+    Map<String, dynamic>? body,
+  }) async {
+    final client = HttpClient();
+    final uri = Uri.parse('$baseUrl$path');
+    final request = await client.openUrl(method, uri).timeout(
+          const Duration(seconds: 10),
+        );
+    request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+    request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    if (body != null) {
+      request.write(jsonEncode(body));
+    }
+    final response = await request.close().timeout(const Duration(seconds: 10));
+    final raw = await response.transform(utf8.decoder).join();
+    client.close();
+
+    if (response.statusCode >= 400) {
+      throw HttpException('API request failed (${response.statusCode})', uri: uri);
+    }
+
+    if (raw.isEmpty) {
+      return <String, dynamic>{};
+    }
+    final decoded = jsonDecode(raw);
+    if (decoded is Map<String, dynamic>) {
+      return decoded;
+    }
+    return <String, dynamic>{};
+  }
+}
+
+int _toInt(dynamic value) {
+  if (value is int) {
+    return value;
+  }
+  return int.tryParse('$value') ?? 0;
+}
+
+int? _nullableInt(dynamic value) {
+  if (value == null) {
+    return null;
+  }
+  return _toInt(value);
+}
+
+String _formatDuration(Duration duration) {
+  final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+  final hours = duration.inHours;
+  if (hours > 0) {
+    return '${hours.toString().padLeft(2, '0')}:$minutes:$seconds';
+  }
+  return '$minutes:$seconds';
 }

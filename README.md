@@ -9,6 +9,8 @@ The product is fully free at this stage and optimized to collect behavioral sign
   - Personalization onboarding
   - One-tap `Sleep Now` mode
   - Smart player UI (categories, loop, timer, fade-out action)
+  - Real `just_audio` playback (play/pause, progress, loop, sleep timer fade-out)
+  - Background playback notification support (`just_audio_background`)
   - Basic sleep tracking insights
   - Sound mixer sliders
 - Laravel API and data foundation in `cariloker`
@@ -31,9 +33,10 @@ The product is fully free at this stage and optimized to collect behavioral sign
 - Domain entities:
   - `SleepTrack`
   - `SleepSession`
-- Integration points (next step):
-  - API client for `/api/v1/sleepwell/*`
-  - audio engine (`just_audio`) with background mode and fade automation
+- Integration status:
+  - API client connected to `/api/v1/sleepwell/*` (catalog, onboarding, sleep-now, sessions, insights)
+  - offline fallback mode if backend is unreachable
+  - audio engine (`just_audio`) with true background playback is still next
 
 ### Backend (Laravel in `cariloker`)
 
@@ -105,7 +108,7 @@ Base: `/api/v1/sleepwell`
 ### Phase 2 (next 1-2 sprints)
 
 - Real audio playback service with background support
-- device ID persistence + API sync
+- persistent device ID storage across reinstalls (current device ID is hostname/OS based)
 - automated fade-out + timer completion events
 - admin content CRUD for tracks and categories
 
@@ -132,6 +135,12 @@ Base: `/api/v1/sleepwell`
 ```bash
 flutter pub get
 flutter run
+```
+
+With API base URL:
+
+```bash
+flutter run --dart-define=SLEEPWELL_API_BASE_URL=https://your-domain.com/api/v1/sleepwell
 ```
 
 ### Laravel API/admin (`cariloker`)
