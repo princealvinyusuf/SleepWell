@@ -835,61 +835,6 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF1A223A), Color(0xFF07090F), Color(0xFF010203)],
-          ),
-        ),
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      '${_index + 1}/$_totalSteps',
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                    if (_step.skippable)
-                      TextButton(
-                        onPressed: () => _goNextStep(skipped: true),
-                        child: const Text('Skip'),
-                      )
-                    else
-                      const SizedBox(width: 56),
-                  ],
-                ),
-                Expanded(
-                  child: SingleChildScrollView(
-                    child: _buildStepContent(),
-                  ),
-                ),
-                if (_step.screenType != 'single_choice')
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: _canContinue() && !widget.state.isBusy
-                          ? () => _goNextStep()
-                          : null,
-                      child: Text(widget.state.isBusy ? 'Saving...' : _step.ctaLabel),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildStepContent() {
     final step = _step;
     final titleStyle = const TextStyle(
@@ -972,16 +917,18 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         return _buildQuestionWrapper(
           step,
           child: Column(
-            children: step.choices
+            children: step.choiceItems
                 .map((choice) => _optionTile(
-                      title: choice,
-                      selected: selected.contains(choice),
+                      title: choice.label,
+                      emoji: choice.emoji,
+                      iconUrl: choice.iconUrl,
+                      selected: selected.contains(choice.label),
                       onTap: () {
                         setState(() {
-                          if (selected.contains(choice)) {
-                            selected.remove(choice);
+                          if (selected.contains(choice.label)) {
+                            selected.remove(choice.label);
                           } else {
-                            selected.add(choice);
+                            selected.add(choice.label);
                           }
                           _answers[step.stepKey] = selected.toList();
                         });
@@ -1056,13 +1003,15 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         return _buildQuestionWrapper(
           step,
           child: Column(
-            children: step.choices
+            children: step.choiceItems
                 .map(
                   (choice) => _optionTile(
-                    title: choice,
-                    selected: selected == choice,
+                    title: choice.label,
+                    emoji: choice.emoji,
+                    iconUrl: choice.iconUrl,
+                    selected: selected == choice.label,
                     onTap: () async {
-                      setState(() => _answers[step.stepKey] = choice);
+                      setState(() => _answers[step.stepKey] = choice.label);
                       await _goNextStep();
                     },
                   ),
@@ -1101,6 +1050,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   Widget _optionTile({
     required String title,
+    String? emoji,
+    String? iconUrl,
     required bool selected,
     required VoidCallback onTap,
   }) {
@@ -1120,15 +1071,120 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               color: selected ? const Color(0xFFE7B86C) : Colors.white.withValues(alpha: 0.18),
             ),
           ),
-          child: Text(
-            title,
-            style: const TextStyle(
-              fontSize: 22,
-              color: Colors.white,
-              fontWeight: FontWeight.w500,
-            ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 22,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              if (iconUrl != null && iconUrl.trim().isNotEmpty)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.network(
+                    _normalizeMediaUrl(iconUrl, apiBaseUrl: SleepWellApi.baseUrl),
+                    width: 44,
+                    height: 44,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                  ),
+                )
+              else if (emoji != null && emoji.isNotEmpty)
+                Text(
+                  emoji,
+                  style: const TextStyle(fontSize: 30),
+                ),
+            ],
           ),
         ),
+      ),
+    );
+  }
+
+  String? _resolvedOnboardingImageUrl(OnboardingStepContent step) {
+    final raw = step.imageUrl;
+    if (raw == null || raw.trim().isEmpty) {
+      return null;
+    }
+    return _normalizeMediaUrl(raw, apiBaseUrl: SleepWellApi.baseUrl);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final step = _step;
+    final stepImage = _resolvedOnboardingImageUrl(step);
+
+    return Scaffold(
+      body: Stack(
+        children: [
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF1A223A), Color(0xFF07090F), Color(0xFF010203)],
+              ),
+            ),
+          ),
+          if (stepImage != null)
+            Positioned.fill(
+              child: Image.network(
+                stepImage,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            ),
+          Positioned.fill(
+            child: Container(
+              color: Colors.black.withValues(alpha: stepImage == null ? 0.12 : 0.45),
+            ),
+          ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        '${_index + 1}/$_totalSteps',
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                      if (_step.skippable)
+                        TextButton(
+                          onPressed: () => _goNextStep(skipped: true),
+                          child: const Text('Skip'),
+                        )
+                      else
+                        const SizedBox(width: 56),
+                    ],
+                  ),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: _buildStepContent(),
+                    ),
+                  ),
+                  if (_step.screenType != 'single_choice')
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: _canContinue() && !widget.state.isBusy
+                            ? () => _goNextStep()
+                            : null,
+                        child: Text(widget.state.isBusy ? 'Saving...' : _step.ctaLabel),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1628,6 +1684,7 @@ class OnboardingStepContent {
     required this.title,
     required this.subtitle,
     required this.options,
+    this.imageUrl,
     required this.ctaLabel,
     required this.skippable,
   });
@@ -1637,15 +1694,16 @@ class OnboardingStepContent {
   final String title;
   final String? subtitle;
   final Map<String, dynamic> options;
+  final String? imageUrl;
   final String ctaLabel;
   final bool skippable;
 
-  List<String> get choices {
+  List<OnboardingChoice> get choiceItems {
     final value = options['choices'];
     if (value is List) {
-      return value.map((e) => '$e').toList();
+      return value.map((item) => OnboardingChoice.fromDynamic(item)).toList();
     }
-    return const <String>[];
+    return const <OnboardingChoice>[];
   }
 
   int get sliderMin => _toInt(options['min']).clamp(1, 24);
@@ -1661,9 +1719,33 @@ class OnboardingStepContent {
       options: (json['options'] is Map<String, dynamic>)
           ? json['options'] as Map<String, dynamic>
           : <String, dynamic>{},
+      imageUrl: json['image_url']?.toString(),
       ctaLabel: '${json['cta_label'] ?? 'Continue'}',
       skippable: json['skippable'] == true || json['skippable'] == 1,
     );
+  }
+}
+
+class OnboardingChoice {
+  const OnboardingChoice({
+    required this.label,
+    this.emoji,
+    this.iconUrl,
+  });
+
+  final String label;
+  final String? emoji;
+  final String? iconUrl;
+
+  factory OnboardingChoice.fromDynamic(dynamic item) {
+    if (item is Map<String, dynamic>) {
+      return OnboardingChoice(
+        label: '${item['label'] ?? ''}',
+        emoji: item['emoji']?.toString(),
+        iconUrl: item['icon_url']?.toString(),
+      );
+    }
+    return OnboardingChoice(label: '$item');
   }
 }
 
@@ -1689,17 +1771,17 @@ const List<OnboardingStepContent> _fallbackOnboardingScreens = <OnboardingStepCo
     title: 'What can we help you with?',
     subtitle: 'We are here for you.',
     options: <String, dynamic>{
-      'choices': <String>[
-        'Fall Asleep Faster',
-        'Sleep All Night',
-        'Relax & Unwind',
-        'Snoring Disruptions',
-        'Manage Tinnitus',
-        'Help My Kids Sleep',
-        'Reduce Anxiety',
-        'Release Stress',
-        'Easier Mornings',
-        'Focus',
+      'choices': <Map<String, String>>[
+        {'label': 'Fall Asleep Faster', 'emoji': '🚀'},
+        {'label': 'Sleep All Night', 'emoji': '⏰'},
+        {'label': 'Relax & Unwind', 'emoji': '🛌'},
+        {'label': 'Snoring Disruptions', 'emoji': '🛏️'},
+        {'label': 'Manage Tinnitus', 'emoji': '👂'},
+        {'label': 'Help My Kids Sleep', 'emoji': '🧸'},
+        {'label': 'Reduce Anxiety', 'emoji': '🪴'},
+        {'label': 'Release Stress', 'emoji': '🕊️'},
+        {'label': 'Easier Mornings', 'emoji': '🌅'},
+        {'label': 'Focus', 'emoji': '🎯'},
       ],
     },
     ctaLabel: 'Continue',
@@ -1753,7 +1835,12 @@ const List<OnboardingStepContent> _fallbackOnboardingScreens = <OnboardingStepCo
     title: 'How satisfied are you with your sleep?',
     subtitle: null,
     options: <String, dynamic>{
-      'choices': <String>['Very Satisfied', 'Neutral', 'Unsatisfied', 'Very unsatisfied'],
+      'choices': <Map<String, String>>[
+        {'label': 'Very Satisfied', 'emoji': '😁'},
+        {'label': 'Neutral', 'emoji': '😐'},
+        {'label': 'Unsatisfied', 'emoji': '🥱'},
+        {'label': 'Very unsatisfied', 'emoji': '😔'},
+      ],
     },
     ctaLabel: 'Continue',
     skippable: true,
