@@ -116,6 +116,15 @@ class _UiBaseline {
 
   static const double nowPlayingMainButton = 84;
   static const double nowPlayingMainIcon = 46;
+
+  static const double savedTitleSize = 34;
+  static const double savedSectionTitleSize = 37;
+  static const double savedTabHeight = 44;
+  static const double savedTabFontSize = 16.5;
+  static const double savedThumbSize = 70;
+  static const double savedRowTitleSize = 17;
+  static const double savedRowSubtitleSize = 14.5;
+  static const double savedMiniPlayerBottomGap = 92;
 }
 
 class SleepWellState extends ChangeNotifier {
@@ -1488,7 +1497,7 @@ class _HomeScreenState extends State<HomeScreen> {
             Positioned(
               left: 14,
               right: 14,
-              bottom: 92,
+              bottom: _UiBaseline.savedMiniPlayerBottomGap,
               child: DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: const LinearGradient(
@@ -2261,19 +2270,356 @@ class _HomeHubPageState extends State<HomeHubPage> {
   }
 }
 
-class SavedPage extends StatelessWidget {
+class SavedPage extends StatefulWidget {
   const SavedPage({super.key, required this.state});
   final SleepWellState state;
 
   @override
+  State<SavedPage> createState() => _SavedPageState();
+}
+
+class _SavedPageState extends State<SavedPage> {
+  int _tabIndex = 0;
+
+  static const List<String> _tabs = <String>['Favorites', 'Recently Played', 'Playlists'];
+
+  @override
   Widget build(BuildContext context) {
-    return const Center(
-      child: Text(
-        'Saved content will appear here.',
-        style: TextStyle(color: Colors.white70),
+    final state = widget.state;
+    final favorites = state.sectionByKey('saved_favorites');
+    final recentlyPlayed = state.sectionByKey('saved_recently_played');
+    final playlists = state.sectionByKey('saved_playlists');
+    final findLove = state.sectionByKey('saved_find_love');
+    final suggestions = state.sectionByKey('saved_suggestions');
+    final activeSection = switch (_tabIndex) {
+      0 => favorites,
+      1 => recentlyPlayed,
+      _ => playlists,
+    };
+    final showFindLoveGrid = _tabIndex != 0;
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0xFF1F1934), Color(0xFF0D0F1D), Color(0xFF090C18)],
+              ),
+            ),
+          ),
+        ),
+        ListView(
+          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+          padding: const EdgeInsets.fromLTRB(_UiBaseline.pageHorizontal, 6, _UiBaseline.pageHorizontal, 190),
+          children: [
+            const SizedBox(height: 6),
+            const Center(
+              child: Text(
+                'My Library',
+                style: TextStyle(fontSize: _UiBaseline.savedTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: _UiBaseline.savedTabHeight,
+              child: ListView.separated(
+                physics: const BouncingScrollPhysics(),
+                scrollDirection: Axis.horizontal,
+                itemCount: _tabs.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 10),
+                itemBuilder: (_, idx) {
+                  final selected = idx == _tabIndex;
+                  return InkWell(
+                    borderRadius: BorderRadius.circular(999),
+                    onTap: () => setState(() => _tabIndex = idx),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 170),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      decoration: BoxDecoration(
+                        color: selected ? Colors.white : Colors.white.withValues(alpha: 0.03),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(color: selected ? Colors.white : Colors.white24, width: 1.4),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        _tabs[idx],
+                        style: TextStyle(
+                          color: selected ? Colors.black : Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: _UiBaseline.savedTabFontSize,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            if ((activeSection?.subtitle ?? '').isNotEmpty) ...[
+              Text(
+                activeSection!.subtitle!,
+                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, letterSpacing: -0.2),
+              ),
+              const SizedBox(height: 6),
+            ],
+            if (activeSection != null)
+              ...activeSection.items.map((item) => _libraryRow(item: item, tabIndex: _tabIndex, state: state))
+            else
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 18),
+                child: Text('No saved items yet.', style: TextStyle(color: Colors.white70)),
+              ),
+            if (_tabIndex == 0 && suggestions != null && suggestions.items.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                suggestions.title ?? 'Suggestions for you',
+                style: const TextStyle(fontSize: _UiBaseline.savedSectionTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+              ),
+              const SizedBox(height: 8),
+              ...suggestions.items.map((item) => _libraryRow(item: item, tabIndex: _tabIndex, state: state)),
+            ],
+            if (showFindLoveGrid && findLove != null && findLove.items.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text(
+                findLove.title ?? 'Find something you love',
+                style: const TextStyle(fontSize: _UiBaseline.savedSectionTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+              ),
+              const SizedBox(height: 12),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: findLove.items.length,
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                  childAspectRatio: 1.0,
+                ),
+                itemBuilder: (_, idx) => _suggestionCard(findLove.items[idx], state),
+              ),
+            ],
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _libraryRow({
+    required HomeItemContent item,
+    required int tabIndex,
+    required SleepWellState state,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: () => _playBestMatchTrack(state, item.title),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                width: _UiBaseline.savedThumbSize,
+                height: _UiBaseline.savedThumbSize,
+                child: item.imageUrl == null
+                    ? _savedArtworkThumb(item.title, compact: true)
+                    : Image.network(
+                        item.imageUrl!,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => _savedArtworkThumb(item.title, compact: true),
+                      ),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: _UiBaseline.savedRowTitleSize,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.25,
+                    ),
+                  ),
+                  if ((item.subtitle ?? '').isNotEmpty)
+                    Text(
+                      item.subtitle!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: _UiBaseline.savedRowSubtitleSize,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            _trailingAction(item: item, tabIndex: tabIndex),
+          ],
+        ),
       ),
     );
   }
+
+  Widget _trailingAction({required HomeItemContent item, required int tabIndex}) {
+    final action = (item.meta['action']?.toString() ?? '').toLowerCase();
+    if (action == 'arrow') {
+      return const Icon(Icons.chevron_right_rounded, size: 24);
+    }
+    if (action == 'heart') {
+      return const Icon(Icons.favorite_border_rounded, size: 22);
+    }
+    if (action == 'none') {
+      return const SizedBox(width: 24, height: 24);
+    }
+    if (tabIndex == 2) {
+      return const Icon(Icons.chevron_right_rounded, size: 24);
+    }
+    final title = item.title.toLowerCase();
+    final subtitle = (item.subtitle ?? '').toLowerCase();
+    if (subtitle.contains('mix') || title.contains('mix')) {
+      return const Icon(Icons.favorite_border_rounded, size: 22);
+    }
+    return const Icon(Icons.more_horiz_rounded, size: 24);
+  }
+
+  Widget _suggestionCard(HomeItemContent item, SleepWellState state) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: () => _playBestMatchTrack(state, item.title),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          color: Colors.white.withValues(alpha: 0.04),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Spacer(),
+              _savedArtworkThumb(item.title, compact: false),
+              const SizedBox(height: 16),
+              Text(
+                item.title,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, letterSpacing: -0.3),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _savedArtworkThumb(String title, {required bool compact}) {
+    final spec = _savedArtSpec(title);
+    final iconSize = compact ? 28.0 : 44.0;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: spec.colors,
+        ),
+      ),
+      child: Stack(
+        children: [
+          Positioned(
+            right: -8,
+            top: -8,
+            child: Icon(spec.secondaryIcon, size: compact ? 24 : 36, color: Colors.white.withValues(alpha: 0.2)),
+          ),
+          Center(
+            child: Icon(spec.primaryIcon, size: iconSize, color: Colors.white.withValues(alpha: 0.9)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  _SavedArtSpec _savedArtSpec(String title) {
+    final key = title.toLowerCase();
+    if (key.contains('mix')) {
+      return const _SavedArtSpec(
+        colors: <Color>[Color(0xFF2D5AB6), Color(0xFF17316B)],
+        primaryIcon: Icons.graphic_eq_rounded,
+        secondaryIcon: Icons.tune_rounded,
+      );
+    }
+    if (key.contains('sleeptale') || key.contains('galileo') || key.contains('underwater')) {
+      return const _SavedArtSpec(
+        colors: <Color>[Color(0xFF2A4D8A), Color(0xFF15223E)],
+        primaryIcon: Icons.menu_book_rounded,
+        secondaryIcon: Icons.auto_stories_rounded,
+      );
+    }
+    if (key.contains('meditation') || key.contains('present') || key.contains('insomnia')) {
+      return const _SavedArtSpec(
+        colors: <Color>[Color(0xFF2E8A6F), Color(0xFF173F35)],
+        primaryIcon: Icons.self_improvement_rounded,
+        secondaryIcon: Icons.spa_rounded,
+      );
+    }
+    if (key.contains('music')) {
+      return const _SavedArtSpec(
+        colors: <Color>[Color(0xFF3960A2), Color(0xFF1A2744)],
+        primaryIcon: Icons.music_note_rounded,
+        secondaryIcon: Icons.album_rounded,
+      );
+    }
+    if (key.contains('sleep') || key.contains('night') || key.contains('rain')) {
+      return const _SavedArtSpec(
+        colors: <Color>[Color(0xFF27637F), Color(0xFF102C39)],
+        primaryIcon: Icons.nights_stay_rounded,
+        secondaryIcon: Icons.bedtime_rounded,
+      );
+    }
+    return const _SavedArtSpec(
+      colors: <Color>[Color(0xFF28396D), Color(0xFF161F3A)],
+      primaryIcon: Icons.headphones_rounded,
+      secondaryIcon: Icons.audiotrack_rounded,
+    );
+  }
+
+  void _playBestMatchTrack(SleepWellState state, String query) {
+    final tracks = state.tracks;
+    if (tracks.isEmpty) {
+      return;
+    }
+    final queryLower = query.toLowerCase();
+    SleepTrack? selected;
+    for (final track in tracks) {
+      final titleLower = track.title.toLowerCase();
+      if (titleLower.contains(queryLower) || queryLower.contains(titleLower)) {
+        selected = track;
+        break;
+      }
+    }
+    selected ??= tracks.first;
+    unawaited(state.playTrack(selected));
+  }
+}
+
+class _SavedArtSpec {
+  const _SavedArtSpec({
+    required this.colors,
+    required this.primaryIcon,
+    required this.secondaryIcon,
+  });
+
+  final List<Color> colors;
+  final IconData primaryIcon;
+  final IconData secondaryIcon;
 }
 
 class RoutinePage extends StatefulWidget {
@@ -3743,39 +4089,195 @@ class InsightsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final quality = state.sectionByKey('insight_sleep_quality');
+    final snore = state.sectionByKey('insight_snore');
+    final phases = state.sectionByKey('insight_phases');
+    final qualityItem = quality?.items.isNotEmpty == true ? quality!.items.first : null;
+    final snoreItem = snore?.items.isNotEmpty == true ? snore!.items.first : null;
+    final phasesItem = phases?.items.isNotEmpty == true ? phases!.items.first : null;
+    final qualityScore = qualityItem == null ? 0 : _toInt(qualityItem.meta['score']);
+
     return ListView(
-      padding: const EdgeInsets.all(16),
+      physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 180),
       children: [
-        const Text('Basic Sleep Tracking', style: TextStyle(fontSize: 20)),
+        const Text('Friday Jul 10', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
         const SizedBox(height: 10),
-        Card(
-          child: ListTile(
-            title: const Text('Usage frequency (7 days)'),
-            trailing: Text('${state.insights.usageFrequencyLast7Days} sessions'),
+        SizedBox(
+          height: 44,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: 7,
+            separatorBuilder: (_, __) => const SizedBox(width: 8),
+            itemBuilder: (_, idx) {
+              final day = 5 + idx;
+              final selected = day == 10;
+              return Container(
+                width: 42,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: selected ? Border.all(color: Colors.white, width: 3.2) : null,
+                  color: selected ? Colors.transparent : Colors.white.withValues(alpha: 0.04),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  '$day',
+                  style: TextStyle(
+                    color: selected ? Colors.white : Colors.white38,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              );
+            },
           ),
         ),
-        Card(
-          child: ListTile(
-            title: const Text('Sleep consistency score'),
-            trailing: Text('${state.insights.consistencyScore}/100'),
+        const SizedBox(height: 10),
+        _insightCard(
+          minHeight: 300,
+          child: Column(
+            children: [
+              SizedBox(
+                height: 92,
+                child: CustomPaint(
+                  painter: _InsightsGaugePainter(),
+                  child: const SizedBox.expand(),
+                ),
+              ),
+              Text('$qualityScore', style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800)),
+              const Text('Sleep quality', style: TextStyle(color: Colors.white60)),
+              const SizedBox(height: 8),
+              Text(
+                qualityItem?.title ?? 'No Sleep Quality Yet',
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                qualityItem?.subtitle ?? 'Track your sleep tonight and wake up to detailed insights here.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70),
+              ),
+            ],
           ),
         ),
-        Card(
-          child: ListTile(
-            title: const Text('Average duration'),
-            trailing: Text('${state.insights.averageDurationMinutes} min'),
+        const SizedBox(height: 10),
+        _insightCard(
+          minHeight: 188,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(snoreItem?.title ?? 'Do you snore?', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                    const SizedBox(height: 6),
+                    Text(
+                      snoreItem?.subtitle ?? "Record your sleep sounds to uncover what's disturbing your rest.",
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                        minimumSize: const Size(140, 44),
+                      ),
+                      onPressed: () {},
+                      child: Text(snoreItem?.ctaLabel ?? 'Track my sleep'),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Container(
+                width: 142,
+                height: 124,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  color: Colors.white.withValues(alpha: 0.09),
+                ),
+                alignment: Alignment.center,
+                child: const Text('😴', style: TextStyle(fontSize: 64)),
+              ),
+            ],
           ),
         ),
-        const SizedBox(height: 8),
-        FilledButton.tonal(
-          onPressed: () async {
-            await state.refreshInsights();
-          },
-          child: const Text('Refresh Insights'),
+        const SizedBox(height: 10),
+        _insightCard(
+          minHeight: 188,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(phasesItem?.title ?? 'Your Sleep Phases', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                    const SizedBox(height: 6),
+                    Text(
+                      phasesItem?.subtitle ?? 'Learn more about your sleeping patterns and how to improve them.',
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                        minimumSize: const Size(140, 44),
+                      ),
+                      onPressed: () {},
+                      child: Text(phasesItem?.ctaLabel ?? 'Learn more'),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Container(
+                width: 142,
+                height: 124,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  gradient: const LinearGradient(colors: [Color(0xFF2E376F), Color(0xFF2D2E58)]),
+                ),
+                alignment: Alignment.center,
+                child: const Icon(Icons.multiline_chart_rounded, size: 62, color: Color(0xFFAD7DFF)),
+              ),
+            ],
+          ),
         ),
       ],
     );
   }
+
+  Widget _insightCard({required Widget child, double? minHeight}) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: Colors.white.withValues(alpha: 0.06),
+      ),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(minHeight: minHeight ?? 0),
+        child: child,
+      ),
+    );
+  }
+}
+
+class _InsightsGaugePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = Paint()
+      ..color = Colors.white.withValues(alpha: 0.12)
+      ..strokeWidth = 8
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height * 2);
+    canvas.drawArc(rect, pi, pi, false, stroke);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class SleepInsights {
@@ -4417,6 +4919,112 @@ const List<HomeSectionContent> _fallbackHomeSections = <HomeSectionContent>[
         subtitle: 'Select a new routine and customize it to suit your sleep needs',
         ctaLabel: 'Explore more',
       ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'insight_sleep_quality',
+    title: null,
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'No Sleep Quality Yet',
+        subtitle: 'Track your sleep tonight and wake up to detailed insights here.',
+        meta: <String, dynamic>{'score': 0},
+      ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'insight_snore',
+    title: null,
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'Do you snore?',
+        subtitle: "Record your sleep sounds to uncover what's disturbing your rest.",
+        ctaLabel: 'Track my sleep',
+      ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'insight_phases',
+    title: null,
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'Your Sleep Phases',
+        subtitle: 'Learn more about your sleeping patterns and how to improve them.',
+        ctaLabel: 'Learn more',
+      ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'saved_favorites',
+    title: 'Favorites',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Train Your Brain to Sleep Better', subtitle: 'Meditation • 51 min', meta: <String, dynamic>{'action': 'more'}),
+      HomeItemContent(title: 'Fall Asleep Faster', subtitle: '6 h 19 min', meta: <String, dynamic>{'action': 'arrow'}),
+      HomeItemContent(title: 'Vanquish 3 a.m. Insomnia', subtitle: 'Meditation • 57 min', meta: <String, dynamic>{'action': 'more'}),
+      HomeItemContent(title: 'Lucid Dreaming Brainwaves', subtitle: 'Mix • 2 items', meta: <String, dynamic>{'action': 'heart'}),
+      HomeItemContent(title: 'Sound Meditation: Brown Noise', subtitle: 'Meditation • 30 min', meta: <String, dynamic>{'action': 'more'}),
+      HomeItemContent(title: 'Ocean Wave Therapy', subtitle: 'Mix • 3 items', meta: <String, dynamic>{'action': 'heart'}),
+      HomeItemContent(title: 'An Evening with Galileo', subtitle: 'SleepTale • 30 min', meta: <String, dynamic>{'action': 'more'}),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'saved_recently_played',
+    title: 'Recently Played',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Dropping into the Present Moment', subtitle: 'Meditation • 14 min', meta: <String, dynamic>{'action': 'more'}),
+      HomeItemContent(title: 'Green Noise Deep Sleep Hypnosis', subtitle: 'Meditation • 30 min', meta: <String, dynamic>{'action': 'more'}),
+      HomeItemContent(title: 'Your First Mix', subtitle: 'Mix • 3 items', meta: <String, dynamic>{'action': 'heart'}),
+      HomeItemContent(title: 'Oceanscape', subtitle: 'Mix • 7 items', meta: <String, dynamic>{'action': 'heart'}),
+      HomeItemContent(title: 'Emotional Release', subtitle: 'Music', meta: <String, dynamic>{'action': 'heart'}),
+      HomeItemContent(title: 'Calming City Rain', subtitle: 'Mix • 3 items', meta: <String, dynamic>{'action': 'heart'}),
+      HomeItemContent(title: 'The Underwater City', subtitle: 'SleepTale • 49 min', meta: <String, dynamic>{'action': 'more'}),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'saved_playlists',
+    title: 'Playlists',
+    subtitle: 'Created for you',
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Fall Asleep Faster', subtitle: '6 h 19 min', meta: <String, dynamic>{'action': 'arrow'}),
+      HomeItemContent(title: 'Deep Sleep', subtitle: '5 h 37 min', meta: <String, dynamic>{'action': 'arrow'}),
+      HomeItemContent(title: 'Bilateral Music For Anxiety', subtitle: '21 min', meta: <String, dynamic>{'action': 'arrow'}),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'saved_find_love',
+    title: 'Find something you love',
+    subtitle: null,
+    sectionType: 'grid',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Create and Save a Mix'),
+      HomeItemContent(title: 'Drift off to a SleepTale'),
+      HomeItemContent(title: 'Relax to a Guided Meditation'),
+      HomeItemContent(title: 'Snooze to curated Music'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'saved_suggestions',
+    title: 'Suggestions for you',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Green Noise Deep Sleep Hypnosis', subtitle: 'Meditation • 30 min', meta: <String, dynamic>{'action': 'more'}),
+      HomeItemContent(title: 'Oceanscape', subtitle: 'Mix • 7 items', meta: <String, dynamic>{'action': 'heart'}),
+      HomeItemContent(title: 'Emotional Release', subtitle: 'Music', meta: <String, dynamic>{'action': 'heart'}),
+      HomeItemContent(title: 'Calming City Rain', subtitle: 'Mix • 3 items', meta: <String, dynamic>{'action': 'heart'}),
+      HomeItemContent(title: 'The Underwater City', subtitle: 'SleepTale • 49 min', meta: <String, dynamic>{'action': 'more'}),
+      HomeItemContent(title: '3D Rain Narrative', subtitle: 'Meditation • 30 min', meta: <String, dynamic>{'action': 'more'}),
     ],
   ),
 ];
