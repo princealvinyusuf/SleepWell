@@ -1477,6 +1477,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 child: ListTile(
                   dense: true,
+                  onTap: () {
+                    final track = widget.state.selectedTrack;
+                    if (track == null) {
+                      return;
+                    }
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => NowPlayingPage(state: widget.state, track: track),
+                      ),
+                    );
+                  },
                   leading: Container(
                     width: 38,
                     height: 38,
@@ -2319,91 +2330,686 @@ class SleepNowPage extends StatelessWidget {
   }
 }
 
-class PlayerPage extends StatelessWidget {
+class PlayerPage extends StatefulWidget {
   const PlayerPage({super.key, required this.state});
   final SleepWellState state;
 
   @override
-  Widget build(BuildContext context) {
-    final duration = state.currentDuration.inMilliseconds <= 0
-        ? const Duration(seconds: 1)
-        : state.currentDuration;
-    final positionMillis = min(
-      state.currentPosition.inMilliseconds,
-      duration.inMilliseconds,
-    ).toDouble();
+  State<PlayerPage> createState() => _PlayerPageState();
+}
 
+class _PlayerPageState extends State<PlayerPage> {
+  int _tabIndex = 0;
+  int _chipIndex = 0;
+  final List<String> _tabs = const <String>['Sounds', 'Music', 'Mixes', 'Meditations', 'SleepTales'];
+
+  static const Map<String, List<String>> _filters = <String, List<String>>{
+    'Sounds': <String>['My ❤️', 'Popular', 'New', 'Colored Noise', 'Nature', 'ASMR'],
+    'Music': <String>['All', 'Deeper Sleep', 'Relaxation', 'Focus'],
+    'Mixes': <String>['All', 'Easy', 'With Sound', 'New'],
+    'Meditations': <String>['All', 'Hypnosis', 'With Sound', 'Emotions'],
+    'SleepTales': <String>['All', 'Fantasy', 'Sci-fi', 'Non-Fiction', 'Kids'],
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final tab = _tabs[_tabIndex];
+    final chips = _filters[tab] ?? const <String>[];
+    final promoted = _sectionForTabPromoted(tab);
+    final sections = _sectionsForTab(tab);
     return ListView(
-      padding: const EdgeInsets.all(16),
+      physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 180),
       children: [
-        const Text('Smart ASMR Player', style: TextStyle(fontSize: 20)),
-        const SizedBox(height: 12),
-        Card(
-          child: ListTile(
-            title: Text(state.selectedTrack?.title ?? 'No track selected'),
-            subtitle: Text(
-              '${_formatDuration(state.currentPosition)} / ${_formatDuration(duration)}',
-            ),
-            trailing: IconButton(
-              icon: Icon(state.isPlaying ? Icons.pause_circle : Icons.play_circle),
-              onPressed: state.selectedTrack == null
-                  ? null
-                  : () async {
-                      await state.togglePlayPause();
-                    },
-            ),
+        SizedBox(
+          height: 48,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemBuilder: (_, i) {
+              final selected = _tabIndex == i;
+              return InkWell(
+                onTap: () => setState(() {
+                  _tabIndex = i;
+                  _chipIndex = 0;
+                }),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                  child: Column(
+                    children: [
+                      Text(
+                        _tabs[i],
+                        style: TextStyle(
+                          fontSize: 42,
+                          color: selected ? Colors.white : Colors.white38,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        margin: const EdgeInsets.only(top: 2),
+                        height: 3,
+                        width: selected ? 44 : 0,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+            separatorBuilder: (_, __) => const SizedBox(width: 14),
+            itemCount: _tabs.length,
           ),
         ),
-        Slider(
-          value: positionMillis,
-          min: 0,
-          max: duration.inMilliseconds.toDouble(),
-          onChanged: (_) {},
-        ),
-        const SizedBox(height: 8),
-        ...state.tracks.map(
-          (track) => Card(
-            child: ListTile(
-              title: Text(track.title),
-              subtitle: Text('${track.category} • ${track.talking ? 'talking' : 'no talking'}'),
-              trailing: IconButton(
-                icon: const Icon(Icons.play_arrow),
-                onPressed: () async {
-                  await state.playTrack(track);
-                },
+        const SizedBox(height: 14),
+        if (chips.isNotEmpty)
+          SizedBox(
+            height: 44,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemBuilder: (_, i) {
+                final selected = _chipIndex == i;
+                return InkWell(
+                  borderRadius: BorderRadius.circular(999),
+                  onTap: () => setState(() => _chipIndex = i),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: selected ? Colors.white54 : Colors.white24),
+                      color: Colors.white.withValues(alpha: selected ? 0.15 : 0.04),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(chips[i], style: const TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                );
+              },
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemCount: chips.length,
+            ),
+          ),
+        if (promoted != null && promoted.items.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          Text(promoted.title ?? 'Promoted content', style: const TextStyle(fontSize: 31, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 200,
+            child: PageView.builder(
+              controller: PageController(viewportFraction: 0.96),
+              itemCount: promoted.items.length,
+              itemBuilder: (_, i) => Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: _promotedCard(promoted.items[i]),
               ),
             ),
           ),
-        ),
-        const SizedBox(height: 16),
-        SwitchListTile(
-          title: const Text('Loop playback'),
-          value: state.loop,
-          onChanged: (value) async {
-            await state.setLoopEnabled(value);
-          },
-        ),
-        ListTile(
-          title: Text('Sleep timer (${state.sleepTimerMinutes} min)'),
-          subtitle: Slider(
-            value: state.sleepTimerMinutes.toDouble(),
-            min: 10,
-            max: 90,
-            divisions: 8,
-            onChanged: (v) async {
-              await state.setSleepTimerMinutes(v.toInt());
-            },
+        ],
+        const SizedBox(height: 18),
+        ...sections.map((section) => _sectionBlock(section)),
+      ],
+    );
+  }
+
+  HomeSectionContent? _sectionForTabPromoted(String tab) {
+    final state = widget.state;
+    switch (tab) {
+      case 'Sounds':
+        return state.sectionByKey('sounds_featured');
+      case 'Music':
+        return state.sectionByKey('music_hero');
+      case 'Mixes':
+        return state.sectionByKey('mixes_featured');
+      case 'Meditations':
+        return state.sectionByKey('meditation_promoted');
+      case 'SleepTales':
+        return state.sectionByKey('sleeptales_promoted');
+      default:
+        return null;
+    }
+  }
+
+  List<HomeSectionContent> _sectionsForTab(String tab) {
+    final state = widget.state;
+    switch (tab) {
+      case 'Sounds':
+        return <HomeSectionContent>[
+          if (state.sectionByKey('sounds_my_sounds') != null) state.sectionByKey('sounds_my_sounds')!,
+          if (state.sectionByKey('sounds_popular') != null) state.sectionByKey('sounds_popular')!,
+        ];
+      case 'Music':
+        return <HomeSectionContent>[
+          if (state.sectionByKey('music_top10') != null) state.sectionByKey('music_top10')!,
+          if (state.sectionByKey('music_layers') != null) state.sectionByKey('music_layers')!,
+        ];
+      case 'Mixes':
+        return <HomeSectionContent>[
+          if (state.sectionByKey('mixes_favorites') != null) state.sectionByKey('mixes_favorites')!,
+          if (state.sectionByKey('mixes_sound_escapes') != null) state.sectionByKey('mixes_sound_escapes')!,
+        ];
+      case 'Meditations':
+        return <HomeSectionContent>[
+          if (state.sectionByKey('meditation_bedtime') != null) state.sectionByKey('meditation_bedtime')!,
+          if (state.sectionByKey('meditation_new') != null) state.sectionByKey('meditation_new')!,
+        ];
+      case 'SleepTales':
+        return <HomeSectionContent>[
+          if (state.sectionByKey('sleeptales_popular') != null) state.sectionByKey('sleeptales_popular')!,
+          if (state.sectionByKey('sleeptales_cozy') != null) state.sectionByKey('sleeptales_cozy')!,
+        ];
+      default:
+        return const <HomeSectionContent>[];
+    }
+  }
+
+  Widget _promotedCard(HomeItemContent item) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: () => _openTrack(item.title),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          gradient: const LinearGradient(
+            colors: [Color(0xFF434D8F), Color(0xFF2C345C)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
           ),
         ),
-        FilledButton.tonal(
-          onPressed: state.isPlaying
-              ? () async {
-                  await state.stopPlayback();
-                }
-              : null,
-          child: const Text('Stop with fade-out'),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.videocam_outlined, size: 16),
+                SizedBox(width: 6),
+                Text('Video'),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(item.title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+            const Spacer(),
+            if ((item.subtitle ?? '').isNotEmpty) Text(item.subtitle!, style: const TextStyle(color: Colors.white70)),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.bottomRight,
+              child: CircleAvatar(
+                radius: 26,
+                backgroundColor: Colors.white,
+                child: const Icon(Icons.play_arrow, color: Colors.black),
+              ),
+            ),
+          ],
         ),
-      ],
+      ),
+    );
+  }
+
+  Widget _sectionBlock(HomeSectionContent section) {
+    final items = section.items;
+    final isGrid = section.sectionType == 'grid';
+    final isChips = section.sectionType == 'chips';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 22),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if ((section.title ?? '').isNotEmpty)
+            Text(section.title!, style: const TextStyle(fontSize: 31, fontWeight: FontWeight.w700)),
+          if ((section.subtitle ?? '').isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, bottom: 10),
+              child: Text(section.subtitle!, style: const TextStyle(color: Colors.white70)),
+            ),
+          if (isGrid)
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 10,
+                mainAxisSpacing: 12,
+                childAspectRatio: 0.78,
+              ),
+              itemCount: items.length,
+              itemBuilder: (_, i) {
+                final item = items[i];
+                return InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () => _openTrack(item.title),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(16),
+                            gradient: const LinearGradient(colors: [Color(0xFFDFB877), Color(0xFFCCA86C)]),
+                          ),
+                          alignment: Alignment.center,
+                          child: const Icon(Icons.graphic_eq_rounded, color: Color(0xFF3B2A19)),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    ],
+                  ),
+                );
+              },
+            )
+          else if (isChips)
+            Wrap(
+              spacing: 12,
+              runSpacing: 10,
+              children: items
+                  .map(
+                    (item) => InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: () => _openTrack(item.title),
+                      child: SizedBox(
+                        width: 160,
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 40,
+                              height: 40,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Icon(Icons.graphic_eq_rounded, size: 20),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                                  Text(item.subtitle ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70)),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            )
+          else
+            SizedBox(
+              height: 220,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(),
+                itemBuilder: (_, i) {
+                  final item = items[i];
+                  return InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () => _openTrack(item.title),
+                    child: SizedBox(
+                      width: 240,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(16),
+                              child: Container(
+                                color: Colors.white.withValues(alpha: 0.08),
+                                child: item.imageUrl == null
+                                    ? const Center(child: Icon(Icons.nights_stay_rounded, size: 42))
+                                    : Image.network(
+                                        item.imageUrl!,
+                                        fit: BoxFit.cover,
+                                        width: double.infinity,
+                                        errorBuilder: (_, __, ___) => const Center(child: Icon(Icons.broken_image)),
+                                      ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w700)),
+                          Text(item.subtitle ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70)),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+                separatorBuilder: (_, __) => const SizedBox(width: 12),
+                itemCount: items.length,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  void _openTrack(String queryTitle) {
+    SleepTrack? selected;
+    final query = queryTitle.toLowerCase();
+    for (final track in widget.state.tracks) {
+      final title = track.title.toLowerCase();
+      if (title.contains(query) || query.contains(title)) {
+        selected = track;
+        break;
+      }
+    }
+    selected ??= widget.state.tracks.isNotEmpty ? widget.state.tracks.first : null;
+    if (selected == null) {
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => TrackDetailPage(state: widget.state, track: selected!),
+      ),
+    );
+  }
+}
+
+class TrackDetailPage extends StatefulWidget {
+  const TrackDetailPage({super.key, required this.state, required this.track});
+  final SleepWellState state;
+  final SleepTrack track;
+
+  @override
+  State<TrackDetailPage> createState() => _TrackDetailPageState();
+}
+
+class _TrackDetailPageState extends State<TrackDetailPage> {
+  bool repeat = false;
+  bool closeAfter = true;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0xFF16475B), Color(0xFF0B0F1B)],
+                ),
+              ),
+            ),
+          ),
+          SafeArea(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
+              children: [
+                Row(
+                  children: [
+                    IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
+                    const Spacer(),
+                    const Icon(Icons.cloud_download_outlined),
+                    const SizedBox(width: 18),
+                    const Icon(Icons.favorite_border_rounded),
+                    const SizedBox(width: 18),
+                    const Icon(Icons.add),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(widget.track.title, style: const TextStyle(fontSize: 56, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+                    onPressed: () async {
+                      await widget.state.playTrack(widget.track);
+                      if (!context.mounted) {
+                        return;
+                      }
+                      Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => NowPlayingPage(state: widget.state, track: widget.track),
+                        ),
+                      );
+                    },
+                    child: const Text('Play'),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: CircleAvatar(radius: 22),
+                  title: Text('Aster J. Haile'),
+                  subtitle: Text('Meditation Teacher • North American Accent'),
+                  trailing: Icon(Icons.chevron_right_rounded),
+                ),
+                const SizedBox(height: 4),
+                const Text('Single Session • 30 min', style: TextStyle(color: Colors.white70)),
+                const SizedBox(height: 10),
+                const Text(
+                  'Try this potent hypnosis accompanied by the sound of green noise, to smooth all thoughts and drift into the deepest sleep.',
+                  style: TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: const ['Deep Sleep', 'With Sound', 'Bored', 'Bedtime', 'Fall Asleep', 'Hypnosis', 'Sleep']
+                      .map((label) => Chip(label: Text(label)))
+                      .toList(),
+                ),
+                const SizedBox(height: 14),
+                _settingRow(icon: Icons.music_note, title: 'Mixes', value: 'None'),
+                _settingRow(icon: Icons.alarm, title: 'Keep music playing', value: 'Until meditation ends'),
+                _toggleRow(icon: Icons.repeat, title: 'Repeat meditation', value: repeat, onChanged: (v) => setState(() => repeat = v)),
+                _toggleRow(
+                  icon: Icons.exit_to_app_outlined,
+                  title: 'Close app after ending',
+                  value: closeAfter,
+                  onChanged: (v) => setState(() => closeAfter = v),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _settingRow({required IconData icon, required String title, required String value}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Colors.white12)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon),
+          const SizedBox(width: 10),
+          Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+          const Spacer(),
+          Text(value, style: const TextStyle(color: Colors.white70)),
+          const SizedBox(width: 6),
+          const Icon(Icons.chevron_right_rounded),
+        ],
+      ),
+    );
+  }
+
+  Widget _toggleRow({
+    required IconData icon,
+    required String title,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Colors.white12)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon),
+          const SizedBox(width: 10),
+          Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+          const Spacer(),
+          Switch(value: value, onChanged: onChanged),
+        ],
+      ),
+    );
+  }
+}
+
+class NowPlayingPage extends StatelessWidget {
+  const NowPlayingPage({super.key, required this.state, required this.track});
+  final SleepWellState state;
+  final SleepTrack track;
+
+  @override
+  Widget build(BuildContext context) {
+    final duration = state.currentDuration.inMilliseconds <= 0
+        ? Duration(seconds: max(track.durationSeconds, 1))
+        : state.currentDuration;
+    final positionMs = min(state.currentPosition.inMilliseconds, duration.inMilliseconds).toDouble();
+    return Scaffold(
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0xFF17495D), Color(0xFF11162A), Color(0xFF171E37)],
+                ),
+              ),
+            ),
+          ),
+          SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: Row(
+                    children: [
+                      IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.keyboard_arrow_down)),
+                      const Spacer(),
+                      FilledButton.tonal(
+                        onPressed: () async {
+                          await state.stopPlayback();
+                          if (context.mounted) {
+                            Navigator.pop(context);
+                          }
+                        },
+                        child: const Text('End Session'),
+                      ),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(track.title, style: const TextStyle(fontSize: 44, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 4),
+                      const Text('Narrated by Aster J. Haile', style: TextStyle(color: Colors.white70)),
+                      const SizedBox(height: 8),
+                      Slider(value: positionMs, min: 0, max: duration.inMilliseconds.toDouble(), onChanged: (_) {}),
+                      Row(
+                        children: [
+                          Text(_formatDuration(state.currentPosition), style: const TextStyle(color: Colors.white70)),
+                          const Spacer(),
+                          Text(_formatDuration(duration), style: const TextStyle(color: Colors.white70)),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          const Icon(Icons.more_horiz),
+                          const Icon(Icons.skip_previous_rounded, color: Colors.white38),
+                          IconButton(
+                            iconSize: 72,
+                            icon: CircleAvatar(
+                              radius: 36,
+                              backgroundColor: Colors.white,
+                              child: Icon(state.isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.black, size: 42),
+                            ),
+                            onPressed: () async => state.togglePlayPause(),
+                          ),
+                          const Icon(Icons.skip_next_rounded),
+                          const Icon(Icons.favorite_border_rounded),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Center(
+                        child: FilledButton(
+                          style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+                          onPressed: () {},
+                          child: const Text('Track My Sleep'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF1B2442),
+                    borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Center(child: Text('Adjust Sounds', style: TextStyle(fontWeight: FontWeight.w700))),
+                      const SizedBox(height: 10),
+                      const Text('Meditation', style: TextStyle(fontWeight: FontWeight.w700)),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const CircleAvatar(child: Icon(Icons.volume_up_rounded)),
+                        title: Text(track.title),
+                        subtitle: Slider(value: 0.55, onChanged: (_) {}),
+                      ),
+                      const Divider(color: Colors.white12),
+                      _adjustRow(title: 'Sounds', subtitle: 'Include relaxing sounds.', button: 'Add Sounds'),
+                      const Divider(color: Colors.white12),
+                      _adjustRow(title: 'Music', subtitle: 'Enhance your mix with music.', button: 'Add Music'),
+                      const Divider(color: Colors.white12),
+                      _adjustRow(title: 'Brainwaves', subtitle: 'Elevate your mix.', button: 'Add Brainwave'),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _adjustRow({
+    required String title,
+    required String subtitle,
+    required String button,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+                Text(subtitle, style: const TextStyle(color: Colors.white70)),
+              ],
+            ),
+          ),
+          FilledButton.tonal(onPressed: () {}, child: Text(button)),
+        ],
+      ),
     );
   }
 }
@@ -2974,6 +3580,157 @@ const List<HomeSectionContent> _fallbackHomeSections = <HomeSectionContent>[
     sectionType: 'promo',
     items: <HomeItemContent>[
       HomeItemContent(title: 'DISCOVER'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'sounds_featured',
+    title: 'Sounds',
+    subtitle: null,
+    sectionType: 'hero_carousel',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Soothing Colored Noise', subtitle: 'Starter Mix'),
+      HomeItemContent(title: 'Rain + Piano', subtitle: 'Sleep in 10 minutes'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'sounds_my_sounds',
+    title: 'My Sounds',
+    subtitle: null,
+    sectionType: 'grid',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Eternity'),
+      HomeItemContent(title: 'Ocean'),
+      HomeItemContent(title: 'Birds'),
+      HomeItemContent(title: 'River'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'sounds_popular',
+    title: 'Popular',
+    subtitle: null,
+    sectionType: 'grid',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Night'),
+      HomeItemContent(title: 'Campfire'),
+      HomeItemContent(title: 'White Noise'),
+      HomeItemContent(title: 'Brown Noise'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'music_hero',
+    title: 'Music',
+    subtitle: null,
+    sectionType: 'hero_carousel',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Peaceful Unwind', subtitle: 'Find stillness and relax to alpha brainwave music.'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'music_top10',
+    title: 'Top 10',
+    subtitle: 'Enjoy music picked for you by DJ BetterSleep.',
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Playlist: Classical Music', subtitle: 'Playlist • 1 h 33 min'),
+      HomeItemContent(title: 'Clarity and Alertness', subtitle: 'Music'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'music_layers',
+    title: 'Music Layers',
+    subtitle: 'Create your own bedtime soundtrack with evolving music loops.',
+    sectionType: 'chips',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Droning Bass', subtitle: 'Music Layers'),
+      HomeItemContent(title: 'Pulsing Bass', subtitle: 'Music Layers'),
+      HomeItemContent(title: 'Echoing Harmony', subtitle: 'Music Layers'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'mixes_favorites',
+    title: 'My Favorites Mixes',
+    subtitle: 'Unwind with your own personal selection of favorite sounds.',
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Your First Mix', subtitle: 'Mix'),
+      HomeItemContent(title: 'Create a mix', subtitle: 'Mix'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'mixes_featured',
+    title: 'Spring Forward',
+    subtitle: 'Let us gently ease you into the time change.',
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Spring Forward', subtitle: 'Let us gently ease your body into easy rest', ctaLabel: 'Listen'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'mixes_sound_escapes',
+    title: 'Sound Escapes',
+    subtitle: 'Leave stress behind and sink into rich soundscapes.',
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Dusk in the Amazon Jungle', subtitle: 'Mix'),
+      HomeItemContent(title: 'Rainy Day at Lake Titicaca', subtitle: 'Mix'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'meditation_promoted',
+    title: 'Promoted content',
+    subtitle: null,
+    sectionType: 'hero_carousel',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Discover Meditation: 1 Minute Guide To Your Relaxation Tool', subtitle: 'Video • by Andrew Green'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'meditation_bedtime',
+    title: 'Your bedtime wind-downs',
+    subtitle: 'Let go of the day and ease into sleep.',
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Starlight Bedtime Hypnosis', subtitle: 'Meditation • 35 min'),
+      HomeItemContent(title: 'Bedtime Bliss Sleep Hypnosis', subtitle: 'Meditation • 1 h 28 min'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'meditation_new',
+    title: 'New releases & popular guidances',
+    subtitle: 'Try new guidances and all-time favorites.',
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Green Noise Deep Sleep Hypnosis', subtitle: 'Meditation'),
+      HomeItemContent(title: 'Back to Sleep Hypnosis', subtitle: 'Meditation'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'sleeptales_promoted',
+    title: 'Promoted content',
+    subtitle: null,
+    sectionType: 'hero_carousel',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Discover SleepTales: 1 Minute Guide to Your Bedtime Tool', subtitle: 'Video • by Shogo Miyakita'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'sleeptales_popular',
+    title: 'Popular SleepTales',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'The Wonderful Wizard of Oz, Part 1', subtitle: 'SleepTale • 52 min'),
+      HomeItemContent(title: 'The Underwater City', subtitle: 'SleepTale • 49 min'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'sleeptales_cozy',
+    title: 'Get cozy with easy listens',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: '2 a.m. at the Blueberry Hill Diner', subtitle: 'SleepTale • 26 min'),
+      HomeItemContent(title: 'Camping at Moonlit Lake', subtitle: 'SleepTale • 28 min'),
     ],
   ),
 ];
