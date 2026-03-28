@@ -84,6 +84,7 @@ class SleepWellState extends ChangeNotifier {
   StreamSubscription<Duration>? _positionSubscription;
   StreamSubscription<PlayerState>? _playerStateSubscription;
   Timer? _sleepTimer;
+  Timer? _bedtimeTicker;
 
   bool isBootstrapping = true;
   bool isBusy = false;
@@ -108,6 +109,9 @@ class SleepWellState extends ChangeNotifier {
   bool isPlaying = false;
   bool enableMixerInSleepNow = true;
   bool loop = true;
+  bool bedtimeRoutineEnabled = false;
+  TimeOfDay bedtimeTime = const TimeOfDay(hour: 22, minute: 30);
+  DateTime? _lastBedtimeTriggerAt;
   int sleepTimerMinutes = 30;
   Duration currentPosition = Duration.zero;
   Duration currentDuration = Duration.zero;
@@ -158,6 +162,7 @@ class SleepWellState extends ChangeNotifier {
     await fetchCatalog();
     await refreshInsights();
     await refreshMixPresets();
+    _startBedtimeTicker();
     isBootstrapping = false;
     notifyListeners();
   }
@@ -214,7 +219,7 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> startSleepNow() async {
+  Future<void> startSleepNow({String entryPoint = 'sleep_now_button'}) async {
     if (isBusy) {
       return;
     }
@@ -240,7 +245,10 @@ class SleepWellState extends ChangeNotifier {
       lastError = 'Running Sleep Now in offline mode.';
     }
 
-    await _startSession(mode: 'sleep_now', entryPoint: 'sleep_now_button');
+    await _startSession(mode: 'sleep_now', entryPoint: entryPoint);
+    if (_isWithinBedtimeAdherenceWindow(DateTime.now())) {
+      await _logEvent('schedule_adherence_hit');
+    }
     await _playSelectedTrack();
     if (enableMixerInSleepNow && !isMixerPlaying) {
       await toggleMixerPlayback();
@@ -415,6 +423,20 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setBedtimeRoutineEnabled(bool enabled) {
+    bedtimeRoutineEnabled = enabled;
+    if (enabled) {
+      lastError = 'Bedtime routine set for ${_formatTimeOfDay(bedtimeTime)}.';
+    }
+    notifyListeners();
+  }
+
+  void setBedtimeTime(TimeOfDay value) {
+    bedtimeTime = value;
+    lastError = 'Bedtime updated to ${_formatTimeOfDay(value)}.';
+    notifyListeners();
+  }
+
   Future<void> togglePlayPause() async {
     if (!_enableAudio) {
       return;
@@ -578,6 +600,45 @@ class SleepWellState extends ChangeNotifier {
     _sleepTimer = null;
   }
 
+  void _startBedtimeTicker() {
+    _bedtimeTicker?.cancel();
+    _bedtimeTicker = Timer.periodic(const Duration(seconds: 30), (_) async {
+      if (!bedtimeRoutineEnabled || !isOnboarded || isBusy || isPlaying) {
+        return;
+      }
+
+      final now = DateTime.now();
+      final alreadyTriggeredThisMinute = _lastBedtimeTriggerAt != null &&
+          _lastBedtimeTriggerAt!.year == now.year &&
+          _lastBedtimeTriggerAt!.month == now.month &&
+          _lastBedtimeTriggerAt!.day == now.day &&
+          _lastBedtimeTriggerAt!.hour == now.hour &&
+          _lastBedtimeTriggerAt!.minute == now.minute;
+
+      if (alreadyTriggeredThisMinute) {
+        return;
+      }
+
+      if (now.hour == bedtimeTime.hour && now.minute == bedtimeTime.minute) {
+        _lastBedtimeTriggerAt = now;
+        await startSleepNow(entryPoint: 'bedtime_scheduler');
+        await _logEvent('schedule_triggered');
+      }
+    });
+  }
+
+  bool _isWithinBedtimeAdherenceWindow(DateTime now) {
+    final scheduled = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      bedtimeTime.hour,
+      bedtimeTime.minute,
+    );
+    final delta = now.difference(scheduled).inMinutes.abs();
+    return delta <= 30;
+  }
+
   Future<void> _fadeOutAndStop() async {
     if (!_enableAudio) {
       return;
@@ -595,6 +656,7 @@ class SleepWellState extends ChangeNotifier {
   @override
   void dispose() {
     _sleepTimer?.cancel();
+    _bedtimeTicker?.cancel();
     _positionSubscription?.cancel();
     _playerStateSubscription?.cancel();
     _player.dispose();
@@ -845,6 +907,32 @@ class SleepNowPage extends StatelessWidget {
               onChanged: (value) {
                 state.setSleepNowMixerEnabled(value);
               },
+            ),
+            SwitchListTile(
+              title: const Text('Bedtime routine'),
+              subtitle: Text(
+                'Auto-start Sleep Now at ${_formatTimeOfDay(state.bedtimeTime)}',
+              ),
+              value: state.bedtimeRoutineEnabled,
+              onChanged: (value) {
+                state.setBedtimeRoutineEnabled(value);
+              },
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () async {
+                  final picked = await showTimePicker(
+                    context: context,
+                    initialTime: state.bedtimeTime,
+                  );
+                  if (picked != null) {
+                    state.setBedtimeTime(picked);
+                  }
+                },
+                icon: const Icon(Icons.schedule),
+                label: const Text('Set Bedtime Time'),
+              ),
             ),
             const SizedBox(height: 22),
             SizedBox(
@@ -1376,4 +1464,10 @@ String _formatDuration(Duration duration) {
     return '${hours.toString().padLeft(2, '0')}:$minutes:$seconds';
   }
   return '$minutes:$seconds';
+}
+
+String _formatTimeOfDay(TimeOfDay value) {
+  final hour = value.hour.toString().padLeft(2, '0');
+  final minute = value.minute.toString().padLeft(2, '0');
+  return '$hour:$minute';
 }

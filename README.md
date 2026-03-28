@@ -9,6 +9,7 @@ The product is fully free at this stage and optimized to collect behavioral sign
   - Personalization onboarding
   - One-tap `Sleep Now` mode
   - Combined `Sleep Now + Mixer` option (single tap can start primary track + ambient layers)
+  - Bedtime routine scheduler (auto-start at selected time) with adherence event logging
   - Smart player UI (categories, loop, timer, fade-out action)
   - Real `just_audio` playback (play/pause, progress, loop, sleep timer fade-out)
   - Background playback notification support (`just_audio_background`)
