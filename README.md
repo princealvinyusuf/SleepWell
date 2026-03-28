@@ -11,6 +11,8 @@ The product is fully free at this stage and optimized to collect behavioral sign
   - Smart player UI (categories, loop, timer, fade-out action)
   - Real `just_audio` playback (play/pause, progress, loop, sleep timer fade-out)
   - Background playback notification support (`just_audio_background`)
+  - Real multi-layer ambient mixer playback (rain/wind/white noise simultaneously)
+  - Mixer preset save/load via `/mix-presets` API
   - Basic sleep tracking insights
   - Sound mixer sliders
 - Laravel API and data foundation in `cariloker`

@@ -80,6 +80,7 @@ class SleepWellState extends ChangeNotifier {
   final SleepWellApi _api;
   final bool _enableAudio;
   final AudioPlayer _player = AudioPlayer();
+  final Map<String, AudioPlayer> _mixerPlayers = <String, AudioPlayer>{};
   StreamSubscription<Duration>? _positionSubscription;
   StreamSubscription<PlayerState>? _playerStateSubscription;
   Timer? _sleepTimer;
@@ -101,6 +102,8 @@ class SleepWellState extends ChangeNotifier {
     'Wind': 0.3,
     'White Noise': 0.5,
   };
+  bool isMixerPlaying = false;
+  List<MixPreset> mixerPresets = <MixPreset>[];
 
   bool isPlaying = false;
   bool loop = true;
@@ -153,6 +156,7 @@ class SleepWellState extends ChangeNotifier {
     await _configureAudio();
     await fetchCatalog();
     await refreshInsights();
+    await refreshMixPresets();
     isBootstrapping = false;
     notifyListeners();
   }
@@ -288,6 +292,96 @@ class SleepWellState extends ChangeNotifier {
 
   void updateMixer(String key, double value) {
     mixer[key] = value;
+    if (_enableAudio && isMixerPlaying) {
+      unawaited(_mixerPlayers[key]?.setVolume(value));
+    }
+    notifyListeners();
+  }
+
+  Future<void> toggleMixerPlayback() async {
+    if (!_enableAudio) {
+      isMixerPlaying = !isMixerPlaying;
+      notifyListeners();
+      return;
+    }
+
+    if (isMixerPlaying) {
+      for (final player in _mixerPlayers.values) {
+        await player.pause();
+      }
+      isMixerPlaying = false;
+      await _logEvent('mixer_stop');
+      notifyListeners();
+      return;
+    }
+
+    for (final entry in mixer.entries) {
+      final channel = entry.key;
+      final volume = entry.value;
+      final player = _mixerPlayers[channel];
+      if (player == null) {
+        continue;
+      }
+
+      if (player.audioSource == null) {
+        final url = _mixerChannelUrls[channel] ?? _fallbackAudioUrl;
+        await player.setAudioSource(
+          AudioSource.uri(
+            Uri.parse(url),
+            tag: MediaItem(
+              id: 'mixer-$channel',
+              title: '$channel ambience',
+              artist: 'SleepWell Mixer',
+            ),
+          ),
+        );
+      }
+
+      await player.setVolume(volume);
+      await player.play();
+    }
+
+    isMixerPlaying = true;
+    await _logEvent('mixer_start');
+    notifyListeners();
+  }
+
+  Future<void> saveCurrentMixPreset() async {
+    final name = 'Preset ${DateTime.now().toIso8601String().replaceFirst("T", " ").substring(0, 16)}';
+    try {
+      await _api.saveMixPreset(
+        deviceId: deviceId,
+        name: name,
+        channels: mixer,
+      );
+      await refreshMixPresets();
+      apiConnected = true;
+      lastError = 'Mixer preset saved.';
+    } catch (_) {
+      apiConnected = false;
+      lastError = 'Could not save preset to API.';
+      notifyListeners();
+    }
+  }
+
+  Future<void> refreshMixPresets() async {
+    try {
+      mixerPresets = await _api.fetchMixPresets(deviceId: deviceId);
+      apiConnected = true;
+    } catch (_) {
+      apiConnected = false;
+    }
+    notifyListeners();
+  }
+
+  Future<void> applyMixPreset(MixPreset preset) async {
+    for (final entry in preset.channels.entries) {
+      mixer[entry.key] = entry.value.clamp(0.0, 1.0).toDouble();
+      if (_enableAudio && isMixerPlaying && _mixerPlayers[entry.key] != null) {
+        await _mixerPlayers[entry.key]!.setVolume(mixer[entry.key]!);
+      }
+    }
+    await _logEvent('mixer_preset_apply');
     notifyListeners();
   }
 
@@ -388,6 +482,12 @@ class SleepWellState extends ChangeNotifier {
       return;
     }
     await _player.setLoopMode(loop ? LoopMode.one : LoopMode.off);
+    for (final entry in mixer.entries) {
+      final player = AudioPlayer();
+      await player.setLoopMode(LoopMode.one);
+      await player.setVolume(entry.value);
+      _mixerPlayers[entry.key] = player;
+    }
     _positionSubscription ??= _player.positionStream.listen((position) {
       currentPosition = position;
       notifyListeners();
@@ -484,6 +584,9 @@ class SleepWellState extends ChangeNotifier {
     _positionSubscription?.cancel();
     _playerStateSubscription?.cancel();
     _player.dispose();
+    for (final player in _mixerPlayers.values) {
+      player.dispose();
+    }
     super.dispose();
   }
 }
@@ -845,6 +948,36 @@ class MixerPage extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       children: [
         const Text('Sound Mixer', style: TextStyle(fontSize: 20)),
+        const SizedBox(height: 8),
+        FilledButton.icon(
+          onPressed: () async {
+            await state.toggleMixerPlayback();
+          },
+          icon: Icon(state.isMixerPlaying ? Icons.stop : Icons.graphic_eq),
+          label: Text(state.isMixerPlaying ? 'Stop Mixer' : 'Start Mixer'),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.tonal(
+                onPressed: () async {
+                  await state.saveCurrentMixPreset();
+                },
+                child: const Text('Save Preset'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: FilledButton.tonal(
+                onPressed: () async {
+                  await state.refreshMixPresets();
+                },
+                child: const Text('Refresh Presets'),
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 10),
         ...state.mixer.entries.map(
           (entry) => ListTile(
@@ -855,6 +988,29 @@ class MixerPage extends StatelessWidget {
             ),
           ),
         ),
+        const SizedBox(height: 8),
+        const Text('Saved Presets'),
+        const SizedBox(height: 6),
+        if (state.mixerPresets.isEmpty)
+          const Text(
+            'No presets yet. Save your current mix first.',
+            style: TextStyle(fontSize: 12, color: Colors.white70),
+          )
+        else
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: state.mixerPresets
+                .map(
+                  (preset) => ActionChip(
+                    label: Text(preset.name),
+                    onPressed: () async {
+                      await state.applyMixPreset(preset);
+                    },
+                  ),
+                )
+                .toList(),
+          ),
       ],
     );
   }
@@ -921,7 +1077,41 @@ class SleepInsights {
   }
 }
 
+class MixPreset {
+  const MixPreset({
+    required this.id,
+    required this.name,
+    required this.channels,
+  });
+
+  final int id;
+  final String name;
+  final Map<String, double> channels;
+
+  factory MixPreset.fromJson(Map<String, dynamic> json) {
+    final rawChannels = (json['channels'] is Map<String, dynamic>)
+        ? json['channels'] as Map<String, dynamic>
+        : <String, dynamic>{};
+
+    final channels = <String, double>{};
+    for (final entry in rawChannels.entries) {
+      channels[entry.key] = _toDouble(entry.value);
+    }
+
+    return MixPreset(
+      id: _toInt(json['id']),
+      name: '${json['name'] ?? 'Preset'}',
+      channels: channels,
+    );
+  }
+}
+
 const String _fallbackAudioUrl = 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3';
+const Map<String, String> _mixerChannelUrls = <String, String>{
+  'Rain': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
+  'Wind': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
+  'White Noise': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3',
+};
 
 class SleepWellApi {
   static const String baseUrl = String.fromEnvironment(
@@ -1036,6 +1226,33 @@ class SleepWellApi {
     return SleepInsights.fromJson(json);
   }
 
+  Future<List<MixPreset>> fetchMixPresets({
+    required String deviceId,
+  }) async {
+    final json = await _request('GET', '/mix-presets/$deviceId');
+    final presetsRaw = (json['presets'] as List<dynamic>? ?? <dynamic>[]);
+    return presetsRaw
+        .whereType<Map<String, dynamic>>()
+        .map(MixPreset.fromJson)
+        .toList();
+  }
+
+  Future<void> saveMixPreset({
+    required String deviceId,
+    required String name,
+    required Map<String, double> channels,
+  }) async {
+    await _request(
+      'POST',
+      '/mix-presets',
+      body: {
+        'device_id': deviceId,
+        'name': name,
+        'channels': channels,
+      },
+    );
+  }
+
   Future<Map<String, dynamic>> _request(
     String method,
     String path, {
@@ -1075,6 +1292,16 @@ int _toInt(dynamic value) {
     return value;
   }
   return int.tryParse('$value') ?? 0;
+}
+
+double _toDouble(dynamic value) {
+  if (value is double) {
+    return value;
+  }
+  if (value is int) {
+    return value.toDouble();
+  }
+  return double.tryParse('$value') ?? 0.0;
 }
 
 int? _nullableInt(dynamic value) {
