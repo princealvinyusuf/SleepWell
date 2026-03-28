@@ -12,7 +12,7 @@ import 'package:sleepwell/main.dart';
 void main() {
   testWidgets('shows onboarding first', (WidgetTester tester) async {
     await tester.pumpWidget(const SleepWellApp(enableAudio: false));
-    expect(find.text('Welcome to SleepWell'), findsOneWidget);
-    expect(find.text('Start Sleeping Better'), findsOneWidget);
+    expect(find.text('Welcome'), findsOneWidget);
+    expect(find.text("Let's begin your journey to peaceful sleep"), findsOneWidget);
   });
 }

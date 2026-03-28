@@ -95,6 +95,8 @@ This schema is intentionally event-rich so recommendation/ranking models can be 
 Base: `/api/v1/sleepwell`
 
 - `POST /onboarding`
+- `GET /onboarding/content`
+- `POST /onboarding/responses`
 - `GET /catalog`
 - `POST /sessions/start`
 - `POST /sessions/{session}/event`
@@ -164,3 +166,4 @@ Then open:
 
 - API: `http://127.0.0.1:8000/api/v1/sleepwell/catalog`
 - Admin: `http://127.0.0.1:8000/dashboard/sleepwell`
+- Onboarding Admin: `http://127.0.0.1:8000/dashboard/sleepwell/onboarding`

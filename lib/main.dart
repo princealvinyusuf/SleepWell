@@ -126,6 +126,7 @@ class SleepWellState extends ChangeNotifier {
     consistencyScore: 0,
     averageDurationMinutes: 0,
   );
+  List<OnboardingStepContent> onboardingScreens = <OnboardingStepContent>[];
 
   List<SleepTrack> tracks = <SleepTrack>[
     const SleepTrack(
@@ -164,6 +165,7 @@ class SleepWellState extends ChangeNotifier {
     _prefs = await SharedPreferences.getInstance();
     _restoreLocalState();
     await _configureAudio();
+    await fetchOnboardingContent();
     await fetchCatalog();
     await refreshInsights();
     await refreshMixPresets();
@@ -188,11 +190,25 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> fetchOnboardingContent() async {
+    try {
+      final data = await _api.fetchOnboardingContent();
+      onboardingScreens = data.isEmpty ? _fallbackOnboardingScreens : data;
+      apiConnected = true;
+    } catch (_) {
+      onboardingScreens = _fallbackOnboardingScreens;
+      apiConnected = false;
+      lastError = 'Using offline onboarding flow.';
+    }
+    notifyListeners();
+  }
+
   Future<void> completeOnboarding({
     required bool talking,
     required int difficulty,
     required List<String> categories,
     required List<String> soundTypes,
+    Map<String, dynamic> answers = const <String, dynamic>{},
   }) async {
     isBusy = true;
     prefersTalking = talking;
@@ -214,6 +230,12 @@ class SleepWellState extends ChangeNotifier {
         categories: categories,
         soundTypes: soundTypes,
       );
+      if (answers.isNotEmpty) {
+        await _api.submitOnboardingResponses(
+          deviceId: deviceId,
+          answers: answers,
+        );
+      }
       apiConnected = true;
       lastError = null;
     } catch (_) {
@@ -787,98 +809,399 @@ class OnboardingScreen extends StatefulWidget {
 }
 
 class _OnboardingScreenState extends State<OnboardingScreen> {
-  bool talking = false;
-  int difficulty = 3;
-  final Set<String> categories = <String>{'rain'};
-  final Set<String> soundTypes = <String>{'nature'};
+  int _index = 0;
+  final Map<String, dynamic> _answers = <String, dynamic>{};
+  final Set<String> _multiSelection = <String>{};
+  final TextEditingController _emailController = TextEditingController();
+  double _sliderValue = 8;
+
+  OnboardingStepContent get _step {
+    final screens = widget.state.onboardingScreens;
+    if (screens.isEmpty) {
+      return _fallbackOnboardingScreens.first;
+    }
+    final safeIndex = _index.clamp(0, screens.length - 1);
+    return screens[safeIndex];
+  }
+
+  int get _totalSteps {
+    final screens = widget.state.onboardingScreens;
+    return screens.isEmpty ? _fallbackOnboardingScreens.length : screens.length;
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Welcome to SleepWell')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          const Text('Talking preference'),
-          SegmentedButton<bool>(
-            segments: const [
-              ButtonSegment<bool>(value: true, label: Text('Talking')),
-              ButtonSegment<bool>(value: false, label: Text('No talking')),
-            ],
-            selected: {talking},
-            onSelectionChanged: (value) => setState(() => talking = value.first),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF1A223A), Color(0xFF07090F), Color(0xFF010203)],
           ),
-          const SizedBox(height: 12),
-          const Text('Sleep difficulty'),
-          Slider(
-            value: difficulty.toDouble(),
-            min: 1,
-            max: 5,
-            divisions: 4,
-            label: '$difficulty',
-            onChanged: (v) => setState(() => difficulty = v.toInt()),
-          ),
-          _chipSection(
-            title: 'Categories',
-            source: const ['whisper', 'no_talking', 'rain', 'roleplay'],
-            selected: categories,
-          ),
-          const SizedBox(height: 10),
-          _chipSection(
-            title: 'Sound types',
-            source: const ['nature', 'brown_noise', 'story', 'roleplay'],
-            selected: soundTypes,
-          ),
-          const SizedBox(height: 20),
-          FilledButton(
-            onPressed: widget.state.isBusy
-                ? null
-                : () async {
-                    await widget.state.completeOnboarding(
-                      talking: talking,
-                      difficulty: difficulty,
-                      categories: categories.toList(),
-                      soundTypes: soundTypes.toList(),
-                    );
-                  },
-            child: Text(
-              widget.state.isBusy ? 'Saving...' : 'Start Sleeping Better',
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      '${_index + 1}/$_totalSteps',
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    if (_step.skippable)
+                      TextButton(
+                        onPressed: () => _goNextStep(skipped: true),
+                        child: const Text('Skip'),
+                      )
+                    else
+                      const SizedBox(width: 56),
+                  ],
+                ),
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: _buildStepContent(),
+                  ),
+                ),
+                if (_step.screenType != 'single_choice')
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: _canContinue() && !widget.state.isBusy
+                          ? () => _goNextStep()
+                          : null,
+                      child: Text(widget.state.isBusy ? 'Saving...' : _step.ctaLabel),
+                    ),
+                  ),
+              ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStepContent() {
+    final step = _step;
+    final titleStyle = const TextStyle(
+      color: Colors.white,
+      fontSize: 36,
+      fontWeight: FontWeight.w800,
+      height: 1.2,
+    );
+    final subtitleStyle = const TextStyle(
+      color: Colors.white70,
+      fontSize: 20,
+      height: 1.3,
+    );
+
+    switch (step.screenType) {
+      case 'welcome':
+        return Padding(
+          padding: const EdgeInsets.only(top: 70),
+          child: Column(
+            children: [
+              const Icon(Icons.nights_stay_rounded, size: 72, color: Color(0xFFE7B86C)),
+              const SizedBox(height: 20),
+              Text(step.title, style: titleStyle, textAlign: TextAlign.center),
+              if (step.subtitle != null) ...[
+                const SizedBox(height: 18),
+                Text(step.subtitle!, style: subtitleStyle, textAlign: TextAlign.center),
+              ],
+              const SizedBox(height: 70),
+              GestureDetector(
+                onTap: () => _goNextStep(),
+                child: Container(
+                  height: 94,
+                  width: 94,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.white.withValues(alpha: 0.15),
+                        blurRadius: 25,
+                        spreadRadius: 8,
+                      ),
+                    ],
+                  ),
+                  child: const Icon(Icons.arrow_forward, color: Colors.black, size: 34),
+                ),
+              ),
+            ],
+          ),
+        );
+      case 'slider':
+        _sliderValue = _answers[step.stepKey] is num
+            ? (_answers[step.stepKey] as num).toDouble()
+            : step.sliderDefault.toDouble();
+        return _buildQuestionWrapper(
+          step,
+          child: Column(
+            children: [
+              const SizedBox(height: 40),
+              Text(
+                '${_sliderValue.round()}h',
+                style: const TextStyle(fontSize: 52, fontWeight: FontWeight.w800),
+              ),
+              Slider(
+                value: _sliderValue,
+                min: step.sliderMin.toDouble(),
+                max: step.sliderMax.toDouble(),
+                divisions: step.sliderMax - step.sliderMin,
+                onChanged: (v) => setState(() {
+                  _sliderValue = v;
+                  _answers[step.stepKey] = v.round();
+                }),
+              ),
+            ],
+          ),
+        );
+      case 'multi_choice':
+        final selected = (_answers[step.stepKey] as List<dynamic>?)?.map((e) => '$e').toSet() ??
+            _multiSelection;
+        return _buildQuestionWrapper(
+          step,
+          child: Column(
+            children: step.choices
+                .map((choice) => _optionTile(
+                      title: choice,
+                      selected: selected.contains(choice),
+                      onTap: () {
+                        setState(() {
+                          if (selected.contains(choice)) {
+                            selected.remove(choice);
+                          } else {
+                            selected.add(choice);
+                          }
+                          _answers[step.stepKey] = selected.toList();
+                        });
+                      },
+                    ))
+                .toList(),
+          ),
+        );
+      case 'email':
+        _emailController.text = (_answers[step.stepKey] ?? '').toString();
+        return _buildQuestionWrapper(
+          step,
+          child: Column(
+            children: [
+              TextField(
+                controller: _emailController,
+                keyboardType: TextInputType.emailAddress,
+                onChanged: (v) => _answers[step.stepKey] = v.trim(),
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  hintText: 'Email',
+                  hintStyle: TextStyle(color: Colors.white54),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  color: Colors.white.withValues(alpha: 0.06),
+                ),
+                child: const Text(
+                  'No spam, no ads. Just better sleep.',
+                  style: TextStyle(color: Colors.white70),
+                ),
+              ),
+            ],
+          ),
+        );
+      case 'info':
+        final stats = (step.options['stats'] as List<dynamic>? ?? const <dynamic>[])
+            .map((e) => '$e')
+            .toList();
+        return _buildQuestionWrapper(
+          step,
+          child: Column(
+            children: [
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: stats
+                    .map(
+                      (s) => Container(
+                        width: 160,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: const Color(0xFFE7B86C), width: 1.2),
+                        ),
+                        child: Text(s, style: const TextStyle(color: Colors.white)),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ],
+          ),
+        );
+      case 'single_choice':
+      default:
+        final selected = _answers[step.stepKey]?.toString();
+        return _buildQuestionWrapper(
+          step,
+          child: Column(
+            children: step.choices
+                .map(
+                  (choice) => _optionTile(
+                    title: choice,
+                    selected: selected == choice,
+                    onTap: () async {
+                      setState(() => _answers[step.stepKey] = choice);
+                      await _goNextStep();
+                    },
+                  ),
+                )
+                .toList(),
+          ),
+        );
+    }
+  }
+
+  Widget _buildQuestionWrapper(OnboardingStepContent step, {required Widget child}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        children: [
+          Text(
+            step.title,
+            style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w800, color: Colors.white),
+            textAlign: TextAlign.center,
+          ),
+          if (step.subtitle != null && step.subtitle!.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              step.subtitle!,
+              style: const TextStyle(fontSize: 20, color: Colors.white70),
+              textAlign: TextAlign.center,
+            ),
+          ],
+          const SizedBox(height: 24),
+          child,
+          const SizedBox(height: 20),
         ],
       ),
     );
   }
 
-  Widget _chipSection({
+  Widget _optionTile({
     required String title,
-    required List<String> source,
-    required Set<String> selected,
+    required bool selected,
+    required VoidCallback onTap,
   }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(title),
-        const SizedBox(height: 6),
-        Wrap(
-          spacing: 8,
-          children: source
-              .map(
-                (item) => FilterChip(
-                  label: Text(item),
-                  selected: selected.contains(item),
-                  onSelected: (enabled) => setState(() {
-                    if (enabled) {
-                      selected.add(item);
-                    } else {
-                      selected.remove(item);
-                    }
-                  }),
-                ),
-              )
-              .toList(),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 170),
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            color: selected ? const Color(0x332C3EFF) : Colors.white.withValues(alpha: 0.02),
+            border: Border.all(
+              color: selected ? const Color(0xFFE7B86C) : Colors.white.withValues(alpha: 0.18),
+            ),
+          ),
+          child: Text(
+            title,
+            style: const TextStyle(
+              fontSize: 22,
+              color: Colors.white,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
         ),
-      ],
+      ),
+    );
+  }
+
+  bool _canContinue() {
+    final step = _step;
+    switch (step.screenType) {
+      case 'welcome':
+      case 'info':
+        return true;
+      case 'multi_choice':
+        return (_answers[step.stepKey] as List<dynamic>?)?.isNotEmpty == true;
+      case 'slider':
+        return true;
+      case 'email':
+        final value = (_answers[step.stepKey] ?? '').toString().trim();
+        return value.isEmpty || value.contains('@');
+      case 'single_choice':
+      default:
+        return _answers[step.stepKey] != null;
+    }
+  }
+
+  Future<void> _goNextStep({bool skipped = false}) async {
+    if (!skipped && !_canContinue()) {
+      return;
+    }
+    if (_index < _totalSteps - 1) {
+      setState(() => _index++);
+      return;
+    }
+
+    final onboardingGoals =
+        (_answers['help_goal'] as List<dynamic>? ?? const <dynamic>[]).map((e) => '$e').toList();
+    final chosenSatisfaction = (_answers['sleep_satisfaction'] ?? '').toString().toLowerCase();
+    final chosenHours = (_answers['desired_sleep_hours'] as num?)?.toInt() ?? 8;
+    final talking = onboardingGoals.any((g) => g.toLowerCase().contains('focus'));
+
+    final categories = <String>[
+      if (onboardingGoals.any((g) => g.toLowerCase().contains('relax'))) 'rain',
+      if (onboardingGoals.any((g) => g.toLowerCase().contains('anxiety'))) 'whisper',
+      if (onboardingGoals.any((g) => g.toLowerCase().contains('focus'))) 'no_talking',
+      if (onboardingGoals.any((g) => g.toLowerCase().contains('kids'))) 'roleplay',
+    ];
+
+    final soundTypes = <String>[
+      if (chosenHours <= 6) 'brown_noise',
+      if (chosenHours >= 8) 'nature',
+      if (chosenSatisfaction.contains('unsatisfied')) 'story',
+      if (onboardingGoals.any((g) => g.toLowerCase().contains('stress'))) 'rain',
+    ];
+
+    var difficulty = 3;
+    if (chosenSatisfaction.contains('very unsatisfied')) {
+      difficulty = 5;
+    } else if (chosenSatisfaction.contains('unsatisfied')) {
+      difficulty = 4;
+    } else if (chosenSatisfaction.contains('very satisfied')) {
+      difficulty = 2;
+    }
+
+    await widget.state.completeOnboarding(
+      talking: talking,
+      difficulty: difficulty,
+      categories: categories.isEmpty ? <String>['rain', 'no_talking'] : categories.toSet().toList(),
+      soundTypes: soundTypes.isEmpty ? <String>['nature'] : soundTypes.toSet().toList(),
+      answers: _answers,
+    );
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Your personalized sleep plan is ready.')),
     );
   }
 }
@@ -1298,12 +1621,162 @@ class MixPreset {
   }
 }
 
+class OnboardingStepContent {
+  const OnboardingStepContent({
+    required this.stepKey,
+    required this.screenType,
+    required this.title,
+    required this.subtitle,
+    required this.options,
+    required this.ctaLabel,
+    required this.skippable,
+  });
+
+  final String stepKey;
+  final String screenType;
+  final String title;
+  final String? subtitle;
+  final Map<String, dynamic> options;
+  final String ctaLabel;
+  final bool skippable;
+
+  List<String> get choices {
+    final value = options['choices'];
+    if (value is List) {
+      return value.map((e) => '$e').toList();
+    }
+    return const <String>[];
+  }
+
+  int get sliderMin => _toInt(options['min']).clamp(1, 24);
+  int get sliderMax => _toInt(options['max']).clamp(sliderMin, 24);
+  int get sliderDefault => _toInt(options['default']).clamp(sliderMin, sliderMax);
+
+  factory OnboardingStepContent.fromJson(Map<String, dynamic> json) {
+    return OnboardingStepContent(
+      stepKey: '${json['step_key'] ?? ''}',
+      screenType: '${json['screen_type'] ?? 'single_choice'}',
+      title: '${json['title'] ?? ''}',
+      subtitle: json['subtitle']?.toString(),
+      options: (json['options'] is Map<String, dynamic>)
+          ? json['options'] as Map<String, dynamic>
+          : <String, dynamic>{},
+      ctaLabel: '${json['cta_label'] ?? 'Continue'}',
+      skippable: json['skippable'] == true || json['skippable'] == 1,
+    );
+  }
+}
+
 const String _fallbackAudioUrl = 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3';
 const Map<String, String> _mixerChannelUrls = <String, String>{
   'Rain': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
   'Wind': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
   'White Noise': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3',
 };
+const List<OnboardingStepContent> _fallbackOnboardingScreens = <OnboardingStepContent>[
+  OnboardingStepContent(
+    stepKey: 'welcome',
+    screenType: 'welcome',
+    title: 'Welcome',
+    subtitle: "Let's begin your journey to peaceful sleep",
+    options: <String, dynamic>{},
+    ctaLabel: 'Start',
+    skippable: true,
+  ),
+  OnboardingStepContent(
+    stepKey: 'help_goal',
+    screenType: 'multi_choice',
+    title: 'What can we help you with?',
+    subtitle: 'We are here for you.',
+    options: <String, dynamic>{
+      'choices': <String>[
+        'Fall Asleep Faster',
+        'Sleep All Night',
+        'Relax & Unwind',
+        'Snoring Disruptions',
+        'Manage Tinnitus',
+        'Help My Kids Sleep',
+        'Reduce Anxiety',
+        'Release Stress',
+        'Easier Mornings',
+        'Focus',
+      ],
+    },
+    ctaLabel: 'Continue',
+    skippable: true,
+  ),
+  OnboardingStepContent(
+    stepKey: 'age_group',
+    screenType: 'single_choice',
+    title: 'As we age, our sleep needs and challenges change',
+    subtitle: 'Please select your age group.',
+    options: <String, dynamic>{
+      'choices': <String>['18 - 24', '25 - 34', '35 - 44', '45 - 54', '55+'],
+    },
+    ctaLabel: 'Continue',
+    skippable: true,
+  ),
+  OnboardingStepContent(
+    stepKey: 'gender',
+    screenType: 'single_choice',
+    title: 'Hormone levels can influence sleep patterns',
+    subtitle: 'Which option best describes you?',
+    options: <String, dynamic>{
+      'choices': <String>['Female', 'Male', 'Non-binary', 'Other'],
+    },
+    ctaLabel: 'Continue',
+    skippable: true,
+  ),
+  OnboardingStepContent(
+    stepKey: 'current_sleep_hours',
+    screenType: 'single_choice',
+    title: 'How many hours of sleep are you currently getting?',
+    subtitle: null,
+    options: <String, dynamic>{
+      'choices': <String>['Less than 5 hours', '5 hours', '6 hours', 'More than 7 hours'],
+    },
+    ctaLabel: 'Continue',
+    skippable: true,
+  ),
+  OnboardingStepContent(
+    stepKey: 'desired_sleep_hours',
+    screenType: 'slider',
+    title: "Set the amount of hours you'd like to spend sleeping.",
+    subtitle: 'Doctors recommend 7 to 9 hours every night to be healthy.',
+    options: <String, dynamic>{'min': 5, 'max': 10, 'default': 8},
+    ctaLabel: 'Continue',
+    skippable: true,
+  ),
+  OnboardingStepContent(
+    stepKey: 'sleep_satisfaction',
+    screenType: 'single_choice',
+    title: 'How satisfied are you with your sleep?',
+    subtitle: null,
+    options: <String, dynamic>{
+      'choices': <String>['Very Satisfied', 'Neutral', 'Unsatisfied', 'Very unsatisfied'],
+    },
+    ctaLabel: 'Continue',
+    skippable: true,
+  ),
+  OnboardingStepContent(
+    stepKey: 'social_proof',
+    screenType: 'info',
+    title: 'Trusted by over 65 million people',
+    subtitle: 'Preparing your sleep plan',
+    options: <String, dynamic>{},
+    ctaLabel: 'Continue',
+    skippable: true,
+  ),
+  OnboardingStepContent(
+    stepKey: 'email_capture',
+    screenType: 'email',
+    title: 'Stay Updated on Your Journey to Restful Nights',
+    subtitle: 'Get weekly progress insights and new content to your inbox.',
+    options: <String, dynamic>{},
+    ctaLabel: 'Continue',
+    skippable: true,
+  ),
+];
 
 class SleepWellApi {
   static const String baseUrl = String.fromEnvironment(
@@ -1344,6 +1817,29 @@ class SleepWellApi {
         'preferred_sound_types': soundTypes,
       },
     );
+  }
+
+  Future<void> submitOnboardingResponses({
+    required String deviceId,
+    required Map<String, dynamic> answers,
+  }) async {
+    await _request(
+      'POST',
+      '/onboarding/responses',
+      body: {
+        'device_id': deviceId,
+        'answers': answers,
+      },
+    );
+  }
+
+  Future<List<OnboardingStepContent>> fetchOnboardingContent() async {
+    final json = await _request('GET', '/onboarding/content');
+    final raw = (json['screens'] as List<dynamic>? ?? <dynamic>[]);
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(OnboardingStepContent.fromJson)
+        .toList();
   }
 
   Future<List<SleepTrack>> fetchSleepNowSequence({
