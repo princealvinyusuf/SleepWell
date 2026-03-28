@@ -1446,11 +1446,15 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int index = 0;
+  bool showProfile = false;
 
   @override
   Widget build(BuildContext context) {
     final pages = [
-      HomeHubPage(state: widget.state),
+      HomeHubPage(
+        state: widget.state,
+        onOpenProfile: () => setState(() => showProfile = true),
+      ),
       PlayerPage(state: widget.state),
       RoutinePage(state: widget.state),
       InsightsPage(state: widget.state),
@@ -1489,7 +1493,14 @@ class _HomeScreenState extends State<HomeScreen> {
                       style: const TextStyle(fontSize: 12),
                     ),
                   ),
-                Expanded(child: pages[index]),
+                Expanded(
+                  child: showProfile
+                      ? ProfilePage(
+                          state: widget.state,
+                          onBack: () => setState(() => showProfile = false),
+                        )
+                      : pages[index],
+                ),
               ],
             ),
           ),
@@ -1634,7 +1645,10 @@ class _HomeScreenState extends State<HomeScreen> {
     return Expanded(
       child: InkWell(
         borderRadius: BorderRadius.circular(18),
-        onTap: () => setState(() => index = i),
+        onTap: () => setState(() {
+          index = i;
+          showProfile = false;
+        }),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 5),
           child: Column(
@@ -1659,8 +1673,13 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 class HomeHubPage extends StatefulWidget {
-  const HomeHubPage({super.key, required this.state});
+  const HomeHubPage({
+    super.key,
+    required this.state,
+    required this.onOpenProfile,
+  });
   final SleepWellState state;
+  final VoidCallback onOpenProfile;
 
   @override
   State<HomeHubPage> createState() => _HomeHubPageState();
@@ -1718,7 +1737,10 @@ class _HomeHubPageState extends State<HomeHubPage> {
                 ),
               ),
               IconButton(onPressed: () {}, icon: const Icon(Icons.search_rounded)),
-              IconButton(onPressed: () {}, icon: const Icon(Icons.account_circle_rounded)),
+              IconButton(
+                onPressed: widget.onOpenProfile,
+                icon: const Icon(Icons.account_circle_rounded),
+              ),
             ],
           ),
           const SizedBox(height: 8),
@@ -2620,6 +2642,308 @@ class _SavedArtSpec {
   final List<Color> colors;
   final IconData primaryIcon;
   final IconData secondaryIcon;
+}
+
+class ProfilePage extends StatelessWidget {
+  const ProfilePage({
+    super.key,
+    required this.state,
+    required this.onBack,
+  });
+
+  final SleepWellState state;
+  final VoidCallback onBack;
+
+  @override
+  Widget build(BuildContext context) {
+    final header = state.sectionByKey('profile_header');
+    final chronotype = state.sectionByKey('profile_chronotype');
+    final accountCard = state.sectionByKey('profile_auth_card');
+    final promo = state.sectionByKey('profile_promo_therapy') ?? state.sectionByKey('promo_therapy');
+    final resources = state.sectionByKey('profile_resources');
+    final account = state.sectionByKey('profile_account');
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0xFF1F1934), Color(0xFF0E1020), Color(0xFF090C18)],
+              ),
+            ),
+          ),
+        ),
+        ListView(
+          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 190),
+          children: [
+            Row(
+              children: [
+                IconButton(onPressed: onBack, icon: const Icon(Icons.arrow_back_ios_new_rounded)),
+                const Spacer(),
+                IconButton(onPressed: () {}, icon: const Icon(Icons.settings_rounded)),
+              ],
+            ),
+            if (header != null && header.items.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Center(
+                child: Container(
+                  width: 94,
+                  height: 94,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withValues(alpha: 0.08),
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  child: const Icon(Icons.nights_stay_rounded, size: 48, color: Color(0xFFFFC992)),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Center(
+                child: Text(
+                  header.items.first.title,
+                  style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                ),
+              ),
+            ],
+            if (chronotype != null && chronotype.items.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              _profileListCard(
+                children: [
+                  _profileRow(
+                    item: chronotype.items.first,
+                    leadingIcon: Icons.auto_awesome_rounded,
+                  ),
+                ],
+              ),
+            ],
+            if (accountCard != null && accountCard.items.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              _accountPromptCard(accountCard.items.first),
+            ],
+            if (promo != null && promo.items.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              Text(
+                promo.title ?? 'Still waking up tired?',
+                style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800, letterSpacing: -0.6),
+              ),
+              const SizedBox(height: 10),
+              _betterHelpPromoCard(promo.items.first),
+            ],
+            if (resources != null && resources.items.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Text(
+                resources.title ?? 'BetterSleep Resources',
+                style: const TextStyle(fontSize: 42, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+              ),
+              const SizedBox(height: 10),
+              _profileListCard(
+                children: resources.items
+                    .map(
+                      (item) => _profileRow(
+                        item: item,
+                        showDivider: item != resources.items.last,
+                      ),
+                    )
+                    .toList(),
+              ),
+            ],
+            if (account != null && account.items.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Text(
+                account.title ?? 'Account',
+                style: const TextStyle(fontSize: 42, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+              ),
+              const SizedBox(height: 10),
+              _profileListCard(
+                children: account.items
+                    .map(
+                      (item) => _profileRow(
+                        item: item,
+                        showDivider: item != account.items.last,
+                      ),
+                    )
+                    .toList(),
+              ),
+            ],
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _accountPromptCard(HomeItemContent item) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: Colors.white.withValues(alpha: 0.04),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        children: [
+          Text(
+            item.title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 46, fontWeight: FontWeight.w800, letterSpacing: -0.55),
+          ),
+          if ((item.subtitle ?? '').isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              item.subtitle!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, height: 1.15),
+            ),
+          ],
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: Colors.white24),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                    minimumSize: const Size(0, 48),
+                  ),
+                  onPressed: () {},
+                  child: const Text('Log in', style: TextStyle(fontWeight: FontWeight.w700)),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: Colors.black,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                    minimumSize: const Size(0, 48),
+                  ),
+                  onPressed: () {},
+                  child: const Text('Register', style: TextStyle(fontWeight: FontWeight.w800)),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _betterHelpPromoCard(HomeItemContent item) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF0F2E52), Color(0xFF17304A), Color(0xFF24314F)],
+        ),
+        border: Border.all(color: Colors.cyanAccent.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('betterhelp', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 10),
+          Text(
+            item.title,
+            style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w800, letterSpacing: -0.4),
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF5BFFE8),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              item.ctaLabel ?? 'Take the assessment',
+              style: const TextStyle(color: Colors.black, fontWeight: FontWeight.w800),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _profileListCard({required List<Widget> children}) {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        color: Colors.white.withValues(alpha: 0.04),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(children: children),
+    );
+  }
+
+  Widget _profileRow({
+    required HomeItemContent item,
+    bool showDivider = false,
+    IconData? leadingIcon,
+  }) {
+    final action = (item.meta['action']?.toString() ?? '').toLowerCase();
+    final badge = item.meta['badge']?.toString() ?? item.ctaLabel ?? '';
+    final value = item.meta['value']?.toString() ?? item.tag ?? '';
+    final showsArrow = action.contains('arrow');
+    final showsBadge = action == 'pill' || action == 'badge';
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          child: Row(
+            children: [
+              if (leadingIcon != null) ...[
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withValues(alpha: 0.1),
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(leadingIcon, size: 20),
+                ),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(item.title, style: const TextStyle(fontWeight: FontWeight.w800)),
+                    if ((item.subtitle ?? '').isNotEmpty)
+                      Text(item.subtitle!, style: const TextStyle(color: Colors.white70)),
+                  ],
+                ),
+              ),
+              if (value.isNotEmpty) ...[
+                Text(value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                const SizedBox(width: 8),
+              ],
+              if (showsBadge && badge.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(999),
+                    color: Colors.white.withValues(alpha: 0.08),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Text(badge, style: const TextStyle(fontWeight: FontWeight.w700)),
+                ),
+              if (showsArrow) const Icon(Icons.chevron_right_rounded, color: Colors.white70),
+            ],
+          ),
+        ),
+        if (showDivider) const Divider(height: 1, color: Colors.white10),
+      ],
+    );
+  }
 }
 
 class RoutinePage extends StatefulWidget {
@@ -5025,6 +5349,79 @@ const List<HomeSectionContent> _fallbackHomeSections = <HomeSectionContent>[
       HomeItemContent(title: 'Calming City Rain', subtitle: 'Mix • 3 items', meta: <String, dynamic>{'action': 'heart'}),
       HomeItemContent(title: 'The Underwater City', subtitle: 'SleepTale • 49 min', meta: <String, dynamic>{'action': 'more'}),
       HomeItemContent(title: '3D Rain Narrative', subtitle: 'Meditation • 30 min', meta: <String, dynamic>{'action': 'more'}),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'profile_header',
+    title: null,
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Sleeper'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'profile_chronotype',
+    title: null,
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'Discover Your Chronotype',
+        subtitle: "Find your body's natural sleep schedule.",
+        meta: <String, dynamic>{'action': 'arrow'},
+      ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'profile_auth_card',
+    title: null,
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'Create an account',
+        subtitle: 'Save your chronotype, analysis and sleep insights to get personalized recommendations.',
+      ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'profile_promo_therapy',
+    title: 'Still waking up tired?',
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'You have 50% off your first month of therapy',
+        subtitle: 'Take the assessment',
+        ctaLabel: 'Take the assessment',
+      ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'profile_resources',
+    title: 'BetterSleep Resources',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Alarm', meta: <String, dynamic>{'action': 'pill', 'badge': 'SET'}),
+      HomeItemContent(title: 'Bedtime', meta: <String, dynamic>{'action': 'pill', 'badge': 'SET'}),
+      HomeItemContent(title: 'Sleep Goal', meta: <String, dynamic>{'action': 'arrow', 'value': '8h'}),
+      HomeItemContent(title: 'Sleep Tracker Widget', meta: <String, dynamic>{'action': 'pill', 'badge': 'ADD'}),
+      HomeItemContent(title: 'Help & Support'),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'profile_account',
+    title: 'Account',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'Subscription',
+        subtitle: 'Yearly',
+        meta: <String, dynamic>{'action': 'pill', 'badge': 'MANAGE'},
+      ),
     ],
   ),
 ];
