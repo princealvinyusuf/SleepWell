@@ -5279,7 +5279,7 @@ class _PlayerPageState extends State<PlayerPage> {
   Widget _promotedCard(HomeItemContent item) {
     return InkWell(
       borderRadius: BorderRadius.circular(20),
-      onTap: () => _openTrack(item.title),
+      onTap: () => _openTrack(item),
       child: Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
@@ -5381,7 +5381,7 @@ class _PlayerPageState extends State<PlayerPage> {
                 final item = items[i];
                 return InkWell(
                   borderRadius: BorderRadius.circular(16),
-                  onTap: () => _openTrack(item.title),
+                  onTap: () => _openTrack(item),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
@@ -5424,7 +5424,7 @@ class _PlayerPageState extends State<PlayerPage> {
                   .map(
                     (item) => InkWell(
                       borderRadius: BorderRadius.circular(12),
-                      onTap: () => _openTrack(item.title),
+                      onTap: () => _openTrack(item),
                       child: SizedBox(
                         width: 160,
                         child: Row(
@@ -5465,7 +5465,7 @@ class _PlayerPageState extends State<PlayerPage> {
                   final item = items[i];
                   return InkWell(
                     borderRadius: BorderRadius.circular(16),
-                    onTap: () => _openTrack(item.title),
+                    onTap: () => _openTrack(item),
                     child: SizedBox(
                       width: _UiBaseline.cardRailWidth,
                       child: Column(
@@ -5504,9 +5504,9 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
-  Future<void> _openTrack(String queryTitle) async {
+  Future<void> _openTrack(HomeItemContent item) async {
     SleepTrack? selected;
-    final query = queryTitle.toLowerCase();
+    final query = item.title.toLowerCase();
     for (final track in widget.state.tracks) {
       final title = track.title.toLowerCase();
       if (title.contains(query) || query.contains(title)) {
@@ -5518,7 +5518,25 @@ class _PlayerPageState extends State<PlayerPage> {
     if (selected == null) {
       return;
     }
-    final kind = selected.playerKind;
+    final subtitleType = (item.subtitle ?? '').trim().toLowerCase();
+    TrackPlayerKind kind;
+    switch (subtitleType) {
+      case 'meditation':
+        kind = TrackPlayerKind.meditation;
+        break;
+      case 'sound':
+        kind = TrackPlayerKind.sound;
+        break;
+      case 'music':
+        kind = TrackPlayerKind.music;
+        break;
+      case 'brainwave':
+        kind = TrackPlayerKind.brainwave;
+        break;
+      default:
+        kind = selected.playerKind;
+        break;
+    }
     if (kind == TrackPlayerKind.meditation) {
       if (!context.mounted) {
         return;
@@ -5540,6 +5558,7 @@ class _PlayerPageState extends State<PlayerPage> {
         builder: (_) => LayeredPlayerPage(
           state: widget.state,
           seedTrack: selected!,
+          initialKind: kind,
         ),
       ),
     );
@@ -5551,10 +5570,12 @@ class LayeredPlayerPage extends StatefulWidget {
     super.key,
     required this.state,
     required this.seedTrack,
+    required this.initialKind,
   });
 
   final SleepWellState state;
   final SleepTrack seedTrack;
+  final TrackPlayerKind initialKind;
 
   @override
   State<LayeredPlayerPage> createState() => _LayeredPlayerPageState();
@@ -5573,7 +5594,7 @@ class _LayeredPlayerPageState extends State<LayeredPlayerPage> {
   @override
   void initState() {
     super.initState();
-    final kind = widget.seedTrack.playerKind;
+    final kind = widget.initialKind;
     _activeKind = (kind == TrackPlayerKind.other || kind == TrackPlayerKind.meditation)
         ? TrackPlayerKind.sound
         : kind;
@@ -5582,7 +5603,6 @@ class _LayeredPlayerPageState extends State<LayeredPlayerPage> {
 
   @override
   Widget build(BuildContext context) {
-    final state = widget.state;
     final activeTrack = _selectedTrack(_activeKind);
     final orderedKinds = <TrackPlayerKind>[
       _activeKind,
@@ -5619,7 +5639,7 @@ class _LayeredPlayerPageState extends State<LayeredPlayerPage> {
                         onPressed: () => Navigator.of(context).pop(),
                         icon: const Icon(Icons.keyboard_arrow_down_rounded),
                       ),
-                      const Spacer(),
+                      const SizedBox(width: 4),
                       Expanded(
                         child: Column(
                           children: [
@@ -5637,7 +5657,6 @@ class _LayeredPlayerPageState extends State<LayeredPlayerPage> {
                           ],
                         ),
                       ),
-                      const Spacer(),
                       IconButton(
                         onPressed: () {},
                         icon: const Icon(Icons.ios_share_rounded),
@@ -5649,119 +5668,26 @@ class _LayeredPlayerPageState extends State<LayeredPlayerPage> {
                     ],
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 18),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        activeTrack?.title ?? 'Select a track',
-                        style: const TextStyle(fontSize: 40, fontWeight: FontWeight.w700),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        activeTrack?.displaySubtitle ?? 'Mix',
-                        style: const TextStyle(color: Colors.white70, fontSize: 18),
-                      ),
-                      const SizedBox(height: 10),
-                      Slider(
-                        value: state.currentPosition.inMilliseconds
-                            .clamp(0, max(state.currentDuration.inMilliseconds, 1))
-                            .toDouble(),
-                        min: 0,
-                        max: max(state.currentDuration.inMilliseconds, 1).toDouble(),
-                        onChanged: (value) async {
-                          await state.seekTo(Duration(milliseconds: value.round()));
-                        },
-                      ),
-                      Row(
-                        children: [
-                          Text(_formatDuration(state.currentPosition), style: const TextStyle(color: Colors.white70)),
-                          const Spacer(),
-                          Text(
-                            _formatDuration(
-                              state.currentDuration.inMilliseconds <= 0
-                                  ? const Duration(minutes: 30)
-                                  : state.currentDuration,
-                            ),
-                            style: const TextStyle(color: Colors.white70),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [
-                          const Icon(Icons.more_horiz, size: 30),
-                          IconButton(
-                            icon: const Icon(Icons.skip_previous_rounded, size: 34),
-                            onPressed: () async => state.playRelativeTrack(-1),
-                          ),
-                          IconButton(
-                            iconSize: _UiBaseline.nowPlayingMainButton,
-                            icon: CircleAvatar(
-                              radius: _UiBaseline.nowPlayingMainButton / 2,
-                              backgroundColor: Colors.white,
-                              child: Icon(
-                                state.isPlaying ? Icons.pause : Icons.play_arrow,
-                                color: Colors.black,
-                                size: _UiBaseline.nowPlayingMainIcon,
-                              ),
-                            ),
-                            onPressed: () async => state.togglePlayPause(),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.skip_next_rounded, size: 34),
-                            onPressed: () async => state.playRelativeTrack(1),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.favorite_border_rounded, size: 30),
-                            onPressed: activeTrack == null
-                                ? null
-                                : () async => state.toggleFavoriteTrack(activeTrack),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 8),
+                const Divider(color: Colors.white12, height: 1),
                 Expanded(
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF2A2E54),
-                      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Center(
-                          child: Text('Adjust Sounds', style: TextStyle(fontWeight: FontWeight.w700)),
-                        ),
-                        const SizedBox(height: 10),
-                        Expanded(
-                          child: ListView(
-                            physics: const BouncingScrollPhysics(),
-                            children: orderedKinds.map((kind) => _layerSection(kind)).toList(),
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                    physics: const BouncingScrollPhysics(),
+                    children: [
+                      ...orderedKinds.map((kind) => _layerSection(kind)),
+                      const SizedBox(height: 6),
+                      Center(
+                        child: OutlinedButton(
+                          onPressed: _clearAllLayers,
+                          style: OutlinedButton.styleFrom(
+                            side: const BorderSide(color: Colors.white24),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                           ),
+                          child: const Text('Clear all'),
                         ),
-                        const SizedBox(height: 6),
-                        Center(
-                          child: OutlinedButton(
-                            onPressed: _clearAllLayers,
-                            style: OutlinedButton.styleFrom(
-                              side: const BorderSide(color: Colors.white24),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-                            ),
-                            child: const Text('Clear all'),
-                          ),
-                        ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
                   ),
                 ),
                 Container(
@@ -6380,6 +6306,10 @@ class NowPlayingPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isFavorite = state.isFavoriteTrack(track);
+    final activeKind = track.playerKind == TrackPlayerKind.other
+        ? TrackPlayerKind.meditation
+        : track.playerKind;
+    final currentSectionLabel = _primarySectionLabel(activeKind);
     final duration = state.currentDuration.inMilliseconds <= 0
         ? Duration(seconds: max(track.durationSeconds, 1))
         : state.currentDuration;
@@ -6399,265 +6329,296 @@ class NowPlayingPage extends StatelessWidget {
             ),
           ),
           SafeArea(
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  child: Row(
-                    children: [
-                      IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.keyboard_arrow_down)),
-                      const Spacer(),
-                      FilledButton.tonal(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: Colors.white.withValues(alpha: 0.14),
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-                        ),
-                        onPressed: () async {
-                          await state.stopPlayback();
-                          if (context.mounted) {
-                            Navigator.pop(context);
-                          }
-                        },
-                        child: const Text('End Session'),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  height: 200,
-                  margin: const EdgeInsets.symmetric(horizontal: _UiBaseline.pageHorizontal),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(_UiBaseline.radiusLg),
-                    gradient: const LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Color(0xFF2BBAB6), Color(0xFF142E45)],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(track.title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                      const SizedBox(height: 4),
-                      const Text('Narrated by Aster J. Haile', style: TextStyle(color: Colors.white70)),
-                      const SizedBox(height: 8),
-                      SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                          trackHeight: 5.5,
-                          activeTrackColor: const Color(0xFFB9A7FF),
-                          inactiveTrackColor: Colors.white24,
-                          thumbColor: Colors.white,
-                          overlayColor: Colors.white24,
-                          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                        ),
-                        child: Slider(
-                          value: positionMs,
-                          min: 0,
-                          max: duration.inMilliseconds.toDouble(),
-                          onChanged: (value) async {
-                            final target = Duration(milliseconds: value.round());
-                            await state.seekTo(target);
-                          },
-                          onChangeEnd: (_) async {
-                            await state.logUiAction('seek_track_position');
-                          },
-                        ),
-                      ),
-                      Row(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final artworkHeight = (constraints.maxHeight * 0.28).clamp(160.0, 220.0).toDouble();
+                return ListView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: const EdgeInsets.only(bottom: 12),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      child: Row(
                         children: [
-                          Text(_formatDuration(state.currentPosition), style: const TextStyle(color: Colors.white70)),
+                          IconButton(
+                            onPressed: () => Navigator.pop(context),
+                            icon: const Icon(Icons.keyboard_arrow_down),
+                          ),
                           const Spacer(),
-                          Text(_formatDuration(duration), style: const TextStyle(color: Colors.white70)),
+                          FilledButton.tonal(
+                            style: FilledButton.styleFrom(
+                              backgroundColor: Colors.white.withValues(alpha: 0.14),
+                              foregroundColor: Colors.white,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                            ),
+                            onPressed: () async {
+                              await state.stopPlayback();
+                              if (context.mounted) {
+                                Navigator.pop(context);
+                              }
+                            },
+                            child: const Text('End Session'),
+                          ),
                         ],
                       ),
-                      const SizedBox(height: 6),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    ),
+                    Container(
+                      height: artworkHeight,
+                      margin: const EdgeInsets.symmetric(horizontal: _UiBaseline.pageHorizontal),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(_UiBaseline.radiusLg),
+                        gradient: const LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [Color(0xFF2BBAB6), Color(0xFF142E45)],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Icon(Icons.more_horiz, size: 30),
-                          IconButton(
-                            icon: const Icon(Icons.skip_previous_rounded, size: 34),
-                            onPressed: () async {
-                              await state.playRelativeTrack(-1);
-                              if (!context.mounted) {
-                                return;
-                              }
-                              Navigator.of(context).pushReplacement(
-                                MaterialPageRoute<void>(
-                                  builder: (_) => NowPlayingPage(
-                                    state: state,
-                                    track: state.selectedTrack ?? track,
-                                  ),
-                                ),
-                              );
-                            },
+                          Text(track.title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                          const SizedBox(height: 4),
+                          const Text('Narrated by Aster J. Haile', style: TextStyle(color: Colors.white70)),
+                          const SizedBox(height: 8),
+                          SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                              trackHeight: 5.5,
+                              activeTrackColor: const Color(0xFFB9A7FF),
+                              inactiveTrackColor: Colors.white24,
+                              thumbColor: Colors.white,
+                              overlayColor: Colors.white24,
+                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                            ),
+                            child: Slider(
+                              value: positionMs,
+                              min: 0,
+                              max: duration.inMilliseconds.toDouble(),
+                              onChanged: (value) async {
+                                final target = Duration(milliseconds: value.round());
+                                await state.seekTo(target);
+                              },
+                              onChangeEnd: (_) async {
+                                await state.logUiAction('seek_track_position');
+                              },
+                            ),
                           ),
-                          IconButton(
-                            iconSize: _UiBaseline.nowPlayingMainButton,
-                            icon: CircleAvatar(
-                              radius: _UiBaseline.nowPlayingMainButton / 2,
-                              backgroundColor: Colors.white,
-                              child: Icon(
-                                state.isPlaying ? Icons.pause : Icons.play_arrow,
-                                color: Colors.black,
-                                size: _UiBaseline.nowPlayingMainIcon,
+                          Row(
+                            children: [
+                              Text(_formatDuration(state.currentPosition), style: const TextStyle(color: Colors.white70)),
+                              const Spacer(),
+                              Text(_formatDuration(duration), style: const TextStyle(color: Colors.white70)),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              const Icon(Icons.more_horiz, size: 30),
+                              IconButton(
+                                icon: const Icon(Icons.skip_previous_rounded, size: 34),
+                                onPressed: () async {
+                                  await state.playRelativeTrack(-1);
+                                  if (!context.mounted) {
+                                    return;
+                                  }
+                                  Navigator.of(context).pushReplacement(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) => NowPlayingPage(
+                                        state: state,
+                                        track: state.selectedTrack ?? track,
+                                      ),
+                                    ),
+                                  );
+                                },
                               ),
-                            ),
-                            onPressed: () async => state.togglePlayPause(),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.skip_next_rounded, size: 34),
-                            onPressed: () async {
-                              await state.playRelativeTrack(1);
-                              if (!context.mounted) {
-                                return;
-                              }
-                              Navigator.of(context).pushReplacement(
-                                MaterialPageRoute<void>(
-                                  builder: (_) => NowPlayingPage(
-                                    state: state,
-                                    track: state.selectedTrack ?? track,
+                              IconButton(
+                                iconSize: _UiBaseline.nowPlayingMainButton,
+                                icon: CircleAvatar(
+                                  radius: _UiBaseline.nowPlayingMainButton / 2,
+                                  backgroundColor: Colors.white,
+                                  child: Icon(
+                                    state.isPlaying ? Icons.pause : Icons.play_arrow,
+                                    color: Colors.black,
+                                    size: _UiBaseline.nowPlayingMainIcon,
                                   ),
                                 ),
-                              );
-                            },
-                          ),
-                          IconButton(
-                            icon: Icon(
-                              isFavorite ? Icons.favorite_rounded : Icons.favorite_border_rounded,
-                              size: 30,
-                            ),
-                            onPressed: () async {
-                              await state.toggleFavoriteTrack(track);
-                              if (!context.mounted) {
-                                return;
-                              }
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    state.isFavoriteTrack(track)
-                                        ? 'Added to favorites'
-                                        : 'Removed from favorites',
-                                  ),
+                                onPressed: () async => state.togglePlayPause(),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.skip_next_rounded, size: 34),
+                                onPressed: () async {
+                                  await state.playRelativeTrack(1);
+                                  if (!context.mounted) {
+                                    return;
+                                  }
+                                  Navigator.of(context).pushReplacement(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) => NowPlayingPage(
+                                        state: state,
+                                        track: state.selectedTrack ?? track,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                              IconButton(
+                                icon: Icon(
+                                  isFavorite ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                                  size: 30,
                                 ),
-                              );
-                            },
+                                onPressed: () async {
+                                  await state.toggleFavoriteTrack(track);
+                                  if (!context.mounted) {
+                                    return;
+                                  }
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        state.isFavoriteTrack(track)
+                                            ? 'Added to favorites'
+                                            : 'Removed from favorites',
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          Center(
+                            child: FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: Colors.white,
+                                foregroundColor: Colors.black,
+                                minimumSize: const Size(220, 50),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                              ),
+                              onPressed: () async {
+                                await state.logUiAction('track_my_sleep_now_playing');
+                                await state.startSleepNow(entryPoint: 'track_detail_track_sleep');
+                                if (!context.mounted) {
+                                  return;
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Sleep tracking started')),
+                                );
+                              },
+                              child: const Text('Track My Sleep'),
+                            ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 10),
-                      Center(
-                        child: FilledButton(
-                          style: FilledButton.styleFrom(
-                            backgroundColor: Colors.white,
-                            foregroundColor: Colors.black,
-                            minimumSize: const Size(220, 50),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: const BoxDecoration(
+                        color: Color(0xFF1B2442),
+                        borderRadius: BorderRadius.vertical(top: Radius.circular(_UiBaseline.radiusXl)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Center(child: Text('Adjust Sounds', style: TextStyle(fontWeight: FontWeight.w700))),
+                          const SizedBox(height: 10),
+                          Text(currentSectionLabel, style: const TextStyle(fontWeight: FontWeight.w700)),
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: const CircleAvatar(child: Icon(Icons.volume_up_rounded)),
+                            title: Text(track.title),
+                            subtitle: Slider(
+                              value: state.mainPlayerVolume,
+                              onChanged: (v) async => state.setMainPlayerVolume(v),
+                            ),
                           ),
-                          onPressed: () async {
-                            await state.logUiAction('track_my_sleep_now_playing');
-                            await state.startSleepNow(entryPoint: 'track_detail_track_sleep');
-                            if (!context.mounted) {
-                              return;
-                            }
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Sleep tracking started')),
-                            );
-                          },
-                          child: const Text('Track My Sleep'),
-                        ),
+                          if (activeKind != TrackPlayerKind.sound) ...[
+                            const Divider(color: Colors.white12),
+                            _adjustRow(
+                              title: 'Sounds',
+                              subtitle: 'Include relaxing sounds.',
+                              button: 'Add Sounds',
+                              onPressed: () async {
+                                if (!state.isMixerPlaying) {
+                                  await state.toggleMixerPlayback();
+                                }
+                                await state.logUiAction('add_sounds_now_playing');
+                                if (!context.mounted) {
+                                  return;
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Relaxing sounds added to mix.')),
+                                );
+                              },
+                            ),
+                          ],
+                          if (activeKind != TrackPlayerKind.music) ...[
+                            const Divider(color: Colors.white12),
+                            _adjustRow(
+                              title: 'Music',
+                              subtitle: 'Enhance your mix with music.',
+                              button: 'Add Music',
+                              onPressed: () async {
+                                final boosted = min(1.0, state.mainPlayerVolume + 0.1);
+                                await state.setMainPlayerVolume(boosted);
+                                await state.logUiAction('add_music_now_playing');
+                                if (!context.mounted) {
+                                  return;
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Music level boosted.')),
+                                );
+                              },
+                            ),
+                          ],
+                          if (activeKind != TrackPlayerKind.brainwave) ...[
+                            const Divider(color: Colors.white12),
+                            _adjustRow(
+                              title: 'Brainwaves',
+                              subtitle: 'Elevate your mix.',
+                              button: 'Add Brainwave',
+                              onPressed: () async {
+                                await state.saveCurrentMixPreset();
+                                await state.logUiAction('add_brainwave_now_playing');
+                                if (!context.mounted) {
+                                  return;
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Brainwave preset saved.')),
+                                );
+                              },
+                            ),
+                          ],
+                        ],
                       ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(16),
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF1B2442),
-                    borderRadius: BorderRadius.vertical(top: Radius.circular(_UiBaseline.radiusXl)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Center(child: Text('Adjust Sounds', style: TextStyle(fontWeight: FontWeight.w700))),
-                      const SizedBox(height: 10),
-                      const Text('Meditation', style: TextStyle(fontWeight: FontWeight.w700)),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: const CircleAvatar(child: Icon(Icons.volume_up_rounded)),
-                        title: Text(track.title),
-                        subtitle: Slider(
-                          value: state.mainPlayerVolume,
-                          onChanged: (v) async => state.setMainPlayerVolume(v),
-                        ),
-                      ),
-                      const Divider(color: Colors.white12),
-                      _adjustRow(
-                        title: 'Sounds',
-                        subtitle: 'Include relaxing sounds.',
-                        button: 'Add Sounds',
-                        onPressed: () async {
-                          if (!state.isMixerPlaying) {
-                            await state.toggleMixerPlayback();
-                          }
-                          await state.logUiAction('add_sounds_now_playing');
-                          if (!context.mounted) {
-                            return;
-                          }
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Relaxing sounds added to mix.')),
-                          );
-                        },
-                      ),
-                      const Divider(color: Colors.white12),
-                      _adjustRow(
-                        title: 'Music',
-                        subtitle: 'Enhance your mix with music.',
-                        button: 'Add Music',
-                        onPressed: () async {
-                          final boosted = min(1.0, state.mainPlayerVolume + 0.1);
-                          await state.setMainPlayerVolume(boosted);
-                          await state.logUiAction('add_music_now_playing');
-                          if (!context.mounted) {
-                            return;
-                          }
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Music level boosted.')),
-                          );
-                        },
-                      ),
-                      const Divider(color: Colors.white12),
-                      _adjustRow(
-                        title: 'Brainwaves',
-                        subtitle: 'Elevate your mix.',
-                        button: 'Add Brainwave',
-                        onPressed: () async {
-                          await state.saveCurrentMixPreset();
-                          await state.logUiAction('add_brainwave_now_playing');
-                          if (!context.mounted) {
-                            return;
-                          }
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Brainwave preset saved.')),
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+                    ),
+                  ],
+                );
+              },
             ),
           ),
         ],
       ),
     );
+  }
+
+  String _primarySectionLabel(TrackPlayerKind kind) {
+    switch (kind) {
+      case TrackPlayerKind.sound:
+        return 'Sounds';
+      case TrackPlayerKind.music:
+        return 'Music';
+      case TrackPlayerKind.brainwave:
+        return 'Brainwaves';
+      case TrackPlayerKind.meditation:
+        return 'Meditation';
+      case TrackPlayerKind.other:
+        return 'Track';
+    }
   }
 
   Widget _adjustRow({
