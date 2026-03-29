@@ -11,8 +11,10 @@
 ## Flutter app
 - Run `flutter pub get`.
 - Verify environment API base URL points to production.
-- Configure AdMob app ids and placement unit ids in backoffice.
+- Set Android AdMob App ID via `ADMOB_APPLICATION_ID` manifest placeholder (replace test ID).
+- Configure placement unit ids in SleepWell ad placement admin.
 - Run smoke checks on Home, Profile, Settings, Saved, Sounds, Routine, Insights.
+- Verify bedtime exact alarm permission + notification scheduling works after reboot.
 
 ## QA and analytics
 - Confirm session lifecycle events: start/event/end.
@@ -22,5 +24,6 @@
 
 ## Go-live checks
 - CI passing (`flutter analyze`, `flutter test`, backend tests).
-- Crash-free cold start on Android and iOS.
+- Crash-free cold start on Android (fresh install + upgrade path).
+- Session events sync status reaches `ok` after reconnect from offline mode.
 - Rollback plan prepared (DB backup + previous app build).

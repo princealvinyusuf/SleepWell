@@ -178,6 +178,10 @@ class SleepWellState extends ChangeNotifier {
   final List<SavedContentItem> savedCloudItems = <SavedContentItem>[];
   final List<Map<String, dynamic>> _queuedEvents = <Map<String, dynamic>>[];
   List<AdPlacementConfig> adPlacements = <AdPlacementConfig>[];
+  DateTime? lastSyncAt;
+  String syncStatus = 'idle';
+  int syncFailureCount = 0;
+  DateTime? _lastScheduleMissedAt;
 
   bool isOnboarded = false;
   bool prefersTalking = false;
@@ -211,6 +215,7 @@ class SleepWellState extends ChangeNotifier {
   int sleepTimerMinutes = 30;
   Duration currentPosition = Duration.zero;
   Duration currentDuration = Duration.zero;
+  double mainPlayerVolume = 1.0;
   SleepTrack? selectedTrack;
   int? _activeSessionId;
   DateTime? _sessionStartedAt;
@@ -272,6 +277,9 @@ class SleepWellState extends ChangeNotifier {
     }
     await refreshInsights();
     await refreshMixPresets();
+    if (_queuedEvents.isNotEmpty) {
+      await _flushQueuedEvents();
+    }
     _startBedtimeTicker();
     if (bedtimeRoutineEnabled) {
       await _scheduleBedtimeNotification();
@@ -311,7 +319,11 @@ class SleepWellState extends ChangeNotifier {
 
   Future<void> fetchHomeFeed() async {
     try {
-      final data = await _api.fetchHomeFeed();
+      final data = await _api.fetchHomeFeed(
+        goal: selectedSleepGoal,
+        timeSegment: _timeSegmentFor(DateTime.now()),
+        deviceId: deviceId,
+      );
       homeSections = data.isEmpty ? _fallbackHomeSections : data;
       apiConnected = true;
     } catch (_) {
@@ -320,6 +332,20 @@ class SleepWellState extends ChangeNotifier {
       lastError = 'Using offline home feed.';
     }
     notifyListeners();
+  }
+
+  String _timeSegmentFor(DateTime now) {
+    final hour = now.hour;
+    if (hour >= 5 && hour < 12) {
+      return 'morning';
+    }
+    if (hour >= 12 && hour < 18) {
+      return 'afternoon';
+    }
+    if (hour >= 18 && hour < 22) {
+      return 'evening';
+    }
+    return 'night';
   }
 
   Future<void> completeOnboarding({
@@ -582,6 +608,21 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> seekTo(Duration position) async {
+    if (!_enableAudio) {
+      return;
+    }
+    await _player.seek(position);
+  }
+
+  Future<void> setMainPlayerVolume(double value) async {
+    mainPlayerVolume = value.clamp(0.0, 1.0);
+    if (_enableAudio) {
+      await _player.setVolume(mainPlayerVolume);
+    }
+    notifyListeners();
+  }
+
   void setSleepNowMixerEnabled(bool enabled) {
     enableMixerInSleepNow = enabled;
     unawaited(_persistLocalState());
@@ -689,6 +730,7 @@ class SleepWellState extends ChangeNotifier {
     if (_activeSessionId == null) {
       return;
     }
+    syncStatus = 'syncing';
     try {
       await _api.addSessionEvent(
         sessionId: _activeSessionId!,
@@ -696,16 +738,21 @@ class SleepWellState extends ChangeNotifier {
         trackId: selectedTrack?.id,
       );
       apiConnected = true;
+      syncStatus = 'ok';
+      syncFailureCount = 0;
+      lastSyncAt = DateTime.now();
       if (_queuedEvents.isNotEmpty) {
         await _flushQueuedEvents();
       }
     } catch (_) {
       apiConnected = false;
-      _queuedEvents.add(<String, dynamic>{
-        'session_id': _activeSessionId,
-        'event_type': eventType,
-        'track_id': selectedTrack?.id,
-      });
+      syncStatus = 'offline_queue';
+      syncFailureCount += 1;
+      _enqueueEvent(
+        sessionId: _activeSessionId!,
+        eventType: eventType,
+        trackId: selectedTrack?.id,
+      );
       unawaited(_persistLocalState());
     }
   }
@@ -743,6 +790,12 @@ class SleepWellState extends ChangeNotifier {
           ..addAll(decoded.whereType<Map<String, dynamic>>());
       }
     }
+    final lastSyncRaw = prefs.getString('last_sync_at');
+    if (lastSyncRaw != null && lastSyncRaw.isNotEmpty) {
+      lastSyncAt = DateTime.tryParse(lastSyncRaw);
+    }
+    syncStatus = prefs.getString('sync_status') ?? syncStatus;
+    syncFailureCount = prefs.getInt('sync_failure_count') ?? syncFailureCount;
 
     preferredCategories
       ..clear()
@@ -793,6 +846,13 @@ class SleepWellState extends ChangeNotifier {
       await prefs.remove('auth_user');
     }
     await prefs.setString('queued_events', jsonEncode(_queuedEvents));
+    await prefs.setString('sync_status', syncStatus);
+    await prefs.setInt('sync_failure_count', syncFailureCount);
+    if (lastSyncAt != null) {
+      await prefs.setString('last_sync_at', lastSyncAt!.toIso8601String());
+    } else {
+      await prefs.remove('last_sync_at');
+    }
   }
 
   Future<void> registerWithEmail({
@@ -889,12 +949,20 @@ class SleepWellState extends ChangeNotifier {
     if (!isAuthenticated) {
       return;
     }
+    DateTime? guardTime;
+    for (final item in savedCloudItems) {
+      if (item.itemType == itemType && item.itemRef == itemRef) {
+        guardTime = item.updatedAt;
+        break;
+      }
+    }
     await _api.upsertSavedItem(
       itemType: itemType,
       itemRef: itemRef,
       title: title,
       subtitle: subtitle,
       meta: meta,
+      ifUnmodifiedSince: guardTime,
     );
     if (refreshAfter) {
       await refreshCloudSavedItems();
@@ -908,6 +976,15 @@ class SleepWellState extends ChangeNotifier {
       adPlacements = const <AdPlacementConfig>[];
     }
     notifyListeners();
+  }
+
+  Future<List<SleepTrack>> searchTracks(String query) async {
+    return _api.searchTracks(
+      query,
+      deviceId: deviceId,
+      goal: selectedSleepGoal,
+      timeSegment: _timeSegmentFor(DateTime.now()),
+    );
   }
 
   bool adEnabled(String screen, String slotKey) {
@@ -925,6 +1002,7 @@ class SleepWellState extends ChangeNotifier {
     if (_queuedEvents.isEmpty) {
       return;
     }
+    syncStatus = 'syncing';
     final pending = List<Map<String, dynamic>>.from(_queuedEvents);
     _queuedEvents.clear();
     for (final event in pending) {
@@ -932,17 +1010,55 @@ class SleepWellState extends ChangeNotifier {
       if (sessionId == null) {
         continue;
       }
+      final nextAttemptRaw = event['next_attempt_at']?.toString();
+      if (nextAttemptRaw != null) {
+        final nextAttempt = DateTime.tryParse(nextAttemptRaw);
+        if (nextAttempt != null && DateTime.now().isBefore(nextAttempt)) {
+          _queuedEvents.add(event);
+          continue;
+        }
+      }
       try {
         await _api.addSessionEvent(
           sessionId: sessionId,
           eventType: '${event['event_type'] ?? 'event'}',
           trackId: _nullableInt(event['track_id']),
         );
+        syncStatus = 'ok';
+        syncFailureCount = 0;
+        lastSyncAt = DateTime.now();
       } catch (_) {
+        final retries = (_nullableInt(event['retries']) ?? 0) + 1;
+        final backoffSeconds = min(300, 5 * (1 << min(retries, 5)));
+        event['retries'] = retries;
+        event['next_attempt_at'] = DateTime.now().add(Duration(seconds: backoffSeconds)).toIso8601String();
         _queuedEvents.add(event);
+        syncStatus = 'offline_queue';
+        syncFailureCount += 1;
       }
     }
     await _persistLocalState();
+    notifyListeners();
+  }
+
+  void _enqueueEvent({
+    required int sessionId,
+    required String eventType,
+    required int? trackId,
+  }) {
+    final signature = '$sessionId::$eventType::${trackId ?? 0}';
+    final duplicate = _queuedEvents.any((e) => '${e['signature'] ?? ''}' == signature);
+    if (duplicate) {
+      return;
+    }
+    _queuedEvents.add(<String, dynamic>{
+      'signature': signature,
+      'session_id': sessionId,
+      'event_type': eventType,
+      'track_id': trackId,
+      'retries': 0,
+      'next_attempt_at': DateTime.now().toIso8601String(),
+    });
   }
 
   Future<void> _syncAnonymousStateToCloud() async {
@@ -1021,6 +1137,7 @@ class SleepWellState extends ChangeNotifier {
       await playFromUrl(primaryUrl);
       currentDuration = _player.duration ?? Duration.zero;
       isPlaying = true;
+      mainPlayerVolume = _player.volume;
       await _scheduleSleepTimer();
     } catch (_) {
       if (primaryUrl == _fallbackAudioUrl) {
@@ -1046,7 +1163,15 @@ class SleepWellState extends ChangeNotifier {
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     const ios = DarwinInitializationSettings();
     const settings = InitializationSettings(android: android, iOS: ios);
-    await _notifications.initialize(settings);
+    await _notifications.initialize(
+      settings,
+      onDidReceiveNotificationResponse: (response) async {
+        if (response.id == 1122 && bedtimeRoutineEnabled && !isPlaying) {
+          await startSleepNow(entryPoint: 'bedtime_notification_tap');
+          await _logEvent('schedule_triggered');
+        }
+      },
+    );
   }
 
   Future<void> _scheduleBedtimeNotification() async {
@@ -1121,10 +1246,33 @@ class SleepWellState extends ChangeNotifier {
         return;
       }
 
+      if (_queuedEvents.isNotEmpty) {
+        await _flushQueuedEvents();
+      }
+
       if (now.hour == bedtimeTime.hour && now.minute == bedtimeTime.minute) {
         _lastBedtimeTriggerAt = now;
         await startSleepNow(entryPoint: 'bedtime_scheduler');
         await _logEvent('schedule_triggered');
+        return;
+      }
+
+      final scheduled = DateTime(
+        now.year,
+        now.month,
+        now.day,
+        bedtimeTime.hour,
+        bedtimeTime.minute,
+      );
+      if (now.isAfter(scheduled.add(const Duration(minutes: 30))) && !isPlaying) {
+        final alreadyLoggedToday = _lastScheduleMissedAt != null &&
+            _lastScheduleMissedAt!.year == now.year &&
+            _lastScheduleMissedAt!.month == now.month &&
+            _lastScheduleMissedAt!.day == now.day;
+        if (!alreadyLoggedToday) {
+          _lastScheduleMissedAt = now;
+          await _logEvent('schedule_missed');
+        }
       }
     });
   }
@@ -2694,7 +2842,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
   Future<void> _openTrackSearch() async {
     var tracks = widget.state.tracks;
     try {
-      final remote = await widget.state._api.searchTracks('');
+      final remote = await widget.state.searchTracks('');
       if (remote.isNotEmpty) {
         tracks = remote;
       }
@@ -2721,27 +2869,33 @@ class _HomeHubPageState extends State<HomeHubPage> {
       widget.onNavigateTab(targetTab.clamp(0, 4));
       return;
     }
-    final deepLink = item.meta['deep_link']?.toString();
-    if (action == 'play_track' && deepLink != null && deepLink.isNotEmpty) {
-      _playBestMatchTrack(deepLink);
+    if (action == 'open_profile') {
+      widget.onOpenProfile();
       return;
     }
-
-    final key = item.title.toLowerCase();
-    if (key.contains('favorite')) {
-      widget.onNavigateTab(4);
+    if (action == 'start_sleep_now') {
+      unawaited(widget.state.startSleepNow(entryPoint: 'home_explore_action'));
       return;
     }
-    if (key.contains('insight')) {
+    if (action == 'open_insights') {
       widget.onNavigateTab(3);
       return;
     }
-    if (key.contains('routine')) {
+    if (action == 'open_routine') {
       widget.onNavigateTab(2);
       return;
     }
-    if (key.contains('sound') || key.contains('mix') || key.contains('music') || key.contains('meditation') || key.contains('sleeptale')) {
+    if (action == 'open_saved') {
+      widget.onNavigateTab(4);
+      return;
+    }
+    if (action == 'open_sounds') {
       widget.onNavigateTab(1);
+      return;
+    }
+    final deepLink = item.meta['deep_link']?.toString();
+    if (action == 'play_track' && deepLink != null && deepLink.isNotEmpty) {
+      _playBestMatchTrack(deepLink);
       return;
     }
     _playBestMatchTrack(item.title);
@@ -3852,11 +4006,33 @@ class _RoutinePageState extends State<RoutinePage> {
           children: [
             Row(
               children: [
-                IconButton(onPressed: () {}, icon: const Icon(Icons.close)),
+                IconButton(
+                  onPressed: () {
+                    state.setBedtimeRoutineEnabled(!state.bedtimeRoutineEnabled);
+                    _showRoutineSnack(
+                      state.bedtimeRoutineEnabled
+                          ? 'Bedtime routine enabled.'
+                          : 'Bedtime routine disabled.',
+                    );
+                  },
+                  icon: const Icon(Icons.close),
+                ),
                 const Spacer(),
                 const Text('Routine Mar 28', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
                 const Spacer(),
-                TextButton(onPressed: () {}, child: const Text('Edit')),
+                TextButton(
+                  onPressed: () async {
+                    final picked = await showTimePicker(
+                      context: context,
+                      initialTime: state.bedtimeTime,
+                    );
+                    if (picked != null) {
+                      state.setBedtimeTime(picked);
+                      state.setBedtimeRoutineEnabled(true);
+                    }
+                  },
+                  child: const Text('Edit'),
+                ),
               ],
             ),
             const SizedBox(height: 6),
@@ -3884,7 +4060,7 @@ class _RoutinePageState extends State<RoutinePage> {
                     label: 'Wake Up Alarm',
                     time: '08:00',
                     enabled: false,
-                    onTap: () {},
+                    onTap: () => _showRoutineSnack('Wake up alarm UI is coming in next pass.'),
                   ),
                 ),
               ],
@@ -3975,7 +4151,7 @@ class _RoutinePageState extends State<RoutinePage> {
                         foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                       ),
-                      onPressed: () {},
+                      onPressed: () => _showRoutineSnack('Explore more routines from Sounds tab.'),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -4040,6 +4216,13 @@ class _RoutinePageState extends State<RoutinePage> {
         ],
       ),
     );
+  }
+
+  void _showRoutineSnack(String text) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
   Widget _routineSection({required String title, required Widget child}) {
@@ -5078,7 +5261,10 @@ class NowPlayingPage extends StatelessWidget {
                           value: positionMs,
                           min: 0,
                           max: duration.inMilliseconds.toDouble(),
-                          onChanged: (_) {},
+                          onChanged: (value) async {
+                            final target = Duration(milliseconds: value.round());
+                            await state.seekTo(target);
+                          },
                         ),
                       ),
                       Row(
@@ -5108,7 +5294,23 @@ class NowPlayingPage extends StatelessWidget {
                             onPressed: () async => state.togglePlayPause(),
                           ),
                           const Icon(Icons.skip_next_rounded, size: 34),
-                          const Icon(Icons.favorite_border_rounded, size: 30),
+                          IconButton(
+                            icon: const Icon(Icons.favorite_border_rounded, size: 30),
+                            onPressed: () async {
+                              await state.upsertSavedItem(
+                                itemType: 'favorites',
+                                itemRef: '${track.id ?? track.title}',
+                                title: track.title,
+                                subtitle: '${track.category} • ${track.talking ? 'Talking' : 'No talking'}',
+                              );
+                              if (!context.mounted) {
+                                return;
+                              }
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Added to favorites')),
+                              );
+                            },
+                          ),
                         ],
                       ),
                       const SizedBox(height: 10),
@@ -5120,7 +5322,15 @@ class NowPlayingPage extends StatelessWidget {
                             minimumSize: const Size(220, 50),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
                           ),
-                          onPressed: () {},
+                          onPressed: () async {
+                            await state.startSleepNow(entryPoint: 'track_detail_track_sleep');
+                            if (!context.mounted) {
+                              return;
+                            }
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Sleep tracking started')),
+                            );
+                          },
                           child: const Text('Track My Sleep'),
                         ),
                       ),
@@ -5145,14 +5355,38 @@ class NowPlayingPage extends StatelessWidget {
                         contentPadding: EdgeInsets.zero,
                         leading: const CircleAvatar(child: Icon(Icons.volume_up_rounded)),
                         title: Text(track.title),
-                        subtitle: Slider(value: 0.55, onChanged: (_) {}),
+                        subtitle: Slider(
+                          value: state.mainPlayerVolume,
+                          onChanged: (v) async => state.setMainPlayerVolume(v),
+                        ),
                       ),
                       const Divider(color: Colors.white12),
-                      _adjustRow(title: 'Sounds', subtitle: 'Include relaxing sounds.', button: 'Add Sounds'),
+                      _adjustRow(
+                        title: 'Sounds',
+                        subtitle: 'Include relaxing sounds.',
+                        button: 'Add Sounds',
+                        onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Open Sounds tab to add layers.')),
+                        ),
+                      ),
                       const Divider(color: Colors.white12),
-                      _adjustRow(title: 'Music', subtitle: 'Enhance your mix with music.', button: 'Add Music'),
+                      _adjustRow(
+                        title: 'Music',
+                        subtitle: 'Enhance your mix with music.',
+                        button: 'Add Music',
+                        onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Open Music tab to add tracks.')),
+                        ),
+                      ),
                       const Divider(color: Colors.white12),
-                      _adjustRow(title: 'Brainwaves', subtitle: 'Elevate your mix.', button: 'Add Brainwave'),
+                      _adjustRow(
+                        title: 'Brainwaves',
+                        subtitle: 'Elevate your mix.',
+                        button: 'Add Brainwave',
+                        onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Open Mixer to add brainwaves.')),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -5168,6 +5402,7 @@ class NowPlayingPage extends StatelessWidget {
     required String title,
     required String subtitle,
     required String button,
+    required VoidCallback onPressed,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
@@ -5188,7 +5423,7 @@ class NowPlayingPage extends StatelessWidget {
               backgroundColor: Colors.white.withValues(alpha: 0.14),
               foregroundColor: Colors.white,
             ),
-            onPressed: () {},
+            onPressed: onPressed,
             child: Text(button),
           ),
         ],
@@ -5374,7 +5609,15 @@ class InsightsPage extends StatelessWidget {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                         minimumSize: const Size(140, 44),
                       ),
-                      onPressed: () {},
+                      onPressed: () async {
+                        await state.startSleepNow(entryPoint: 'insight_snore_track_sleep');
+                        if (!context.mounted) {
+                          return;
+                        }
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Sleep tracking started.')),
+                        );
+                      },
                       child: Text(snoreItem?.ctaLabel ?? 'Track my sleep'),
                     ),
                   ],
@@ -5417,7 +5660,15 @@ class InsightsPage extends StatelessWidget {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                         minimumSize: const Size(140, 44),
                       ),
-                      onPressed: () {},
+                      onPressed: () async {
+                        await state.refreshInsights();
+                        if (!context.mounted) {
+                          return;
+                        }
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Insights refreshed from latest sessions.')),
+                        );
+                      },
                       child: Text(phasesItem?.ctaLabel ?? 'Learn more'),
                     ),
                   ],
@@ -5497,11 +5748,13 @@ class MixPreset {
     required this.id,
     required this.name,
     required this.channels,
+    this.updatedAt,
   });
 
   final int id;
   final String name;
   final Map<String, double> channels;
+  final DateTime? updatedAt;
 
   factory MixPreset.fromJson(Map<String, dynamic> json) {
     final rawChannels = (json['channels'] is Map<String, dynamic>)
@@ -5517,6 +5770,7 @@ class MixPreset {
       id: _toInt(json['id']),
       name: '${json['name'] ?? 'Preset'}',
       channels: channels,
+      updatedAt: DateTime.tryParse('${json['updated_at'] ?? ''}'),
     );
   }
 }
@@ -5567,6 +5821,7 @@ class SavedContentItem {
     required this.title,
     this.subtitle,
     this.meta = const <String, dynamic>{},
+    this.updatedAt,
   });
 
   final int id;
@@ -5575,6 +5830,7 @@ class SavedContentItem {
   final String title;
   final String? subtitle;
   final Map<String, dynamic> meta;
+  final DateTime? updatedAt;
 
   factory SavedContentItem.fromJson(Map<String, dynamic> json) {
     final meta = json['meta'] is Map<String, dynamic>
@@ -5587,6 +5843,7 @@ class SavedContentItem {
       title: '${json['title'] ?? ''}',
       subtitle: json['subtitle']?.toString(),
       meta: meta,
+      updatedAt: DateTime.tryParse('${json['updated_at'] ?? ''}'),
     );
   }
 }
@@ -6495,8 +6752,23 @@ class SleepWellApi {
         .toList();
   }
 
-  Future<List<HomeSectionContent>> fetchHomeFeed() async {
-    final json = await _request('GET', '/home-feed');
+  Future<List<HomeSectionContent>> fetchHomeFeed({
+    String? goal,
+    String? timeSegment,
+    String? deviceId,
+  }) async {
+    final params = <String>[];
+    if (goal != null && goal.isNotEmpty) {
+      params.add('goal=${Uri.encodeQueryComponent(goal)}');
+    }
+    if (timeSegment != null && timeSegment.isNotEmpty) {
+      params.add('time_segment=${Uri.encodeQueryComponent(timeSegment)}');
+    }
+    if (deviceId != null && deviceId.isNotEmpty) {
+      params.add('device_id=${Uri.encodeQueryComponent(deviceId)}');
+    }
+    final suffix = params.isEmpty ? '' : '?${params.join('&')}';
+    final json = await _request('GET', '/home-feed$suffix');
     final raw = (json['sections'] as List<dynamic>? ?? <dynamic>[]);
     return raw
         .whereType<Map<String, dynamic>>()
@@ -6689,6 +6961,7 @@ class SleepWellApi {
     required String title,
     String? subtitle,
     Map<String, dynamic> meta = const <String, dynamic>{},
+    DateTime? ifUnmodifiedSince,
   }) async {
     await _request(
       'POST',
@@ -6699,12 +6972,28 @@ class SleepWellApi {
         'title': title,
         'subtitle': subtitle,
         'meta': meta,
+        if (ifUnmodifiedSince != null) 'if_unmodified_since': ifUnmodifiedSince.toIso8601String(),
       },
     );
   }
 
-  Future<List<SleepTrack>> searchTracks(String query) async {
-    final json = await _request('GET', '/search?q=${Uri.encodeQueryComponent(query)}');
+  Future<List<SleepTrack>> searchTracks(
+    String query, {
+    String? deviceId,
+    String? goal,
+    String? timeSegment,
+  }) async {
+    final params = <String>['q=${Uri.encodeQueryComponent(query)}'];
+    if (deviceId != null && deviceId.isNotEmpty) {
+      params.add('device_id=${Uri.encodeQueryComponent(deviceId)}');
+    }
+    if (goal != null && goal.isNotEmpty) {
+      params.add('goal=${Uri.encodeQueryComponent(goal)}');
+    }
+    if (timeSegment != null && timeSegment.isNotEmpty) {
+      params.add('time_segment=${Uri.encodeQueryComponent(timeSegment)}');
+    }
+    final json = await _request('GET', '/search?${params.join('&')}');
     final raw = (json['results'] as List<dynamic>? ?? <dynamic>[]);
     return raw
         .whereType<Map<String, dynamic>>()
