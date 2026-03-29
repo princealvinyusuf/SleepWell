@@ -2597,7 +2597,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
               const Expanded(
                 child: Text(
                   'Good evening',
-                  style: TextStyle(fontSize: 38, fontWeight: FontWeight.w800),
+                  style: TextStyle(fontSize: 34, fontWeight: FontWeight.w800),
                 ),
               ),
               IconButton(
@@ -2647,7 +2647,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
             ),
           ),
           const SizedBox(height: 16),
-          const Text('My mixes', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w700)),
+          const Text('My mixes', style: TextStyle(fontSize: 27, fontWeight: FontWeight.w700)),
           const SizedBox(height: 12),
           SizedBox(
             height: 84,
@@ -3001,7 +3001,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
   }
 
   Widget _sectionHeader(String text) {
-    return Text(text, style: const TextStyle(fontSize: 31, fontWeight: FontWeight.w700, letterSpacing: -0.2));
+    return Text(text, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w700, letterSpacing: -0.2));
   }
 
   Widget _heroCard({required HomeItemContent item}) {
@@ -5375,7 +5375,12 @@ class _PlayerPageState extends State<PlayerPage> {
                         ),
                       ),
                       const SizedBox(height: 6),
-                      Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      Text(
+                        item.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                      ),
                     ],
                   ),
                 );
