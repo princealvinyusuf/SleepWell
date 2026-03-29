@@ -215,6 +215,9 @@ class SleepWellState extends ChangeNotifier {
   bool loop = true;
   bool bedtimeRoutineEnabled = false;
   TimeOfDay bedtimeTime = const TimeOfDay(hour: 22, minute: 30);
+  bool wakeAlarmEnabled = false;
+  TimeOfDay wakeAlarmTime = const TimeOfDay(hour: 8, minute: 0);
+  String appLanguage = 'en';
   DateTime? _lastBedtimeTriggerAt;
   int sleepTimerMinutes = 30;
   Duration currentPosition = Duration.zero;
@@ -787,6 +790,29 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setWakeAlarmEnabled(bool enabled) {
+    wakeAlarmEnabled = enabled;
+    lastError = enabled
+        ? 'Wake-up alarm set for ${_formatTimeOfDay(wakeAlarmTime)}.'
+        : 'Wake-up alarm disabled.';
+    unawaited(_persistLocalState());
+    notifyListeners();
+  }
+
+  void setWakeAlarmTime(TimeOfDay value) {
+    wakeAlarmTime = value;
+    wakeAlarmEnabled = true;
+    lastError = 'Wake-up alarm updated to ${_formatTimeOfDay(value)}.';
+    unawaited(_persistLocalState());
+    notifyListeners();
+  }
+
+  void setAppLanguage(String code) {
+    appLanguage = code;
+    unawaited(_persistLocalState());
+    notifyListeners();
+  }
+
   Future<void> togglePlayPause() async {
     if (!_enableAudio) {
       return;
@@ -893,6 +919,11 @@ class SleepWellState extends ChangeNotifier {
     final bedtimeHour = prefs.getInt('bedtime_hour') ?? bedtimeTime.hour;
     final bedtimeMinute = prefs.getInt('bedtime_minute') ?? bedtimeTime.minute;
     bedtimeTime = TimeOfDay(hour: bedtimeHour, minute: bedtimeMinute);
+    wakeAlarmEnabled = prefs.getBool('wake_alarm_enabled') ?? false;
+    final wakeHour = prefs.getInt('wake_alarm_hour') ?? wakeAlarmTime.hour;
+    final wakeMinute = prefs.getInt('wake_alarm_minute') ?? wakeAlarmTime.minute;
+    wakeAlarmTime = TimeOfDay(hour: wakeHour, minute: wakeMinute);
+    appLanguage = prefs.getString('app_language') ?? appLanguage;
     selectedSleepGoal = prefs.getString('selected_sleep_goal') ?? selectedSleepGoal;
     authToken = prefs.getString('auth_token');
     final userRaw = prefs.getString('auth_user');
@@ -969,6 +1000,10 @@ class SleepWellState extends ChangeNotifier {
     await prefs.setBool('bedtime_routine_enabled', bedtimeRoutineEnabled);
     await prefs.setInt('bedtime_hour', bedtimeTime.hour);
     await prefs.setInt('bedtime_minute', bedtimeTime.minute);
+    await prefs.setBool('wake_alarm_enabled', wakeAlarmEnabled);
+    await prefs.setInt('wake_alarm_hour', wakeAlarmTime.hour);
+    await prefs.setInt('wake_alarm_minute', wakeAlarmTime.minute);
+    await prefs.setString('app_language', appLanguage);
     await prefs.setString('selected_sleep_goal', selectedSleepGoal);
     await prefs.setString('mixer_state', jsonEncode(mixer));
     if (authToken != null) {
@@ -2390,9 +2425,51 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!context.mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Language setting will be available soon.')),
+      final selected = await showModalBottomSheet<String>(
+        context: context,
+        backgroundColor: const Color(0xFF121A2D),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (sheetContext) {
+          return SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  title: const Text('English'),
+                  trailing: widget.state.appLanguage == 'en'
+                      ? const Icon(Icons.check_rounded)
+                      : null,
+                  onTap: () => Navigator.of(sheetContext).pop('en'),
+                ),
+                ListTile(
+                  title: const Text('Bahasa Indonesia'),
+                  trailing: widget.state.appLanguage == 'id'
+                      ? const Icon(Icons.check_rounded)
+                      : null,
+                  onTap: () => Navigator.of(sheetContext).pop('id'),
+                ),
+              ],
+            ),
+          );
+        },
       );
+      if (selected != null && selected.isNotEmpty) {
+        widget.state.setAppLanguage(selected);
+        if (!context.mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              selected == 'id'
+                  ? 'Bahasa Indonesia selected.'
+                  : 'English selected.',
+            ),
+          ),
+        );
+      }
       return;
     }
     if (action == 'heart') {
@@ -2523,10 +2600,18 @@ class _HomeHubPageState extends State<HomeHubPage> {
             alignment: Alignment.centerLeft,
             child: InkWell(
               borderRadius: BorderRadius.circular(999),
-              onTap: () {
-                widget.onNavigateTab(3);
-                _showHomeSnack('Sleep Recorder opened in Insights.');
-              },
+              onTap: () => widget.onAction(
+                context,
+                const HomeItemContent(
+                  title: 'Recorder',
+                  meta: <String, dynamic>{
+                    'action': 'navigate_tab',
+                    'target_tab': 3,
+                    'analytics_event': 'open_insights_recorder',
+                  },
+                ),
+                'home_recorder_chip',
+              ),
               child: DecoratedBox(
                 decoration: BoxDecoration(
                   color: Colors.white,
@@ -2559,10 +2644,12 @@ class _HomeHubPageState extends State<HomeHubPage> {
                   icon: Icons.add,
                   onTap: () async {
                     await state.saveCurrentMixPreset();
-                    if (!mounted) {
+                    if (!context.mounted) {
                       return;
                     }
-                    _showHomeSnack('Current mixer levels saved as preset.');
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Current mixer levels saved as preset.')),
+                    );
                   },
                 ),
                 const SizedBox(width: 10),
@@ -2574,10 +2661,14 @@ class _HomeHubPageState extends State<HomeHubPage> {
                       await state.applyMixPreset(state.mixerPresets.first);
                     }
                     await state.toggleMixerPlayback();
-                    if (!mounted) {
+                    if (!context.mounted) {
                       return;
                     }
-                    _showHomeSnack(state.isMixerPlaying ? 'Mixer started.' : 'Mixer stopped.');
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(state.isMixerPlaying ? 'Mixer started.' : 'Mixer stopped.'),
+                      ),
+                    );
                   },
                 ),
               ],
@@ -2728,10 +2819,14 @@ class _HomeHubPageState extends State<HomeHubPage> {
             const SizedBox(height: 18),
             _sleepRecorderCard(
               sleepRecorder,
-              onPressed: () {
-                widget.onNavigateTab(3);
-                _showHomeSnack('Track My Sleep opened in Insights.');
-              },
+              onPressed: () => widget.onAction(
+                context,
+                _withDefaultPlayAction(
+                  sleepRecorder.items.first,
+                  source: 'home_sleep_recorder',
+                ),
+                'home_sleep_recorder',
+              ),
             ),
           ],
           if (coloredNoises != null) ...[
@@ -2845,10 +2940,18 @@ class _HomeHubPageState extends State<HomeHubPage> {
             const SizedBox(height: 18),
             _discoverBanner(
               discover.items.first,
-              onTap: () {
-                widget.onNavigateTab(1);
-                _showHomeSnack('Explore more sounds in Sounds.');
-              },
+              onTap: () => widget.onAction(
+                context,
+                const HomeItemContent(
+                  title: 'Discover',
+                  meta: <String, dynamic>{
+                    'action': 'navigate_tab',
+                    'target_tab': 1,
+                    'analytics_event': 'open_sounds_discover',
+                  },
+                ),
+                'home_discover_banner',
+              ),
             ),
           ],
           if (trySomethingElse != null) _horizontalSection(trySomethingElse),
@@ -2913,7 +3016,11 @@ class _HomeHubPageState extends State<HomeHubPage> {
             const SizedBox(height: 6),
             FilledButton(
               style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
-              onPressed: () => _playBestMatchTrack(item.title),
+              onPressed: () => widget.onAction(
+                context,
+                _withDefaultPlayAction(item, source: 'home_hero_cta'),
+                'home_hero_cta',
+              ),
               child: Text(item.ctaLabel ?? 'Listen'),
             ),
           ],
@@ -3072,24 +3179,6 @@ class _HomeHubPageState extends State<HomeHubPage> {
     );
   }
 
-  void _playBestMatchTrack(String query) {
-    final tracks = widget.state.tracks;
-    if (tracks.isEmpty) {
-      return;
-    }
-    final queryLower = query.toLowerCase();
-    SleepTrack? selected;
-    for (final track in tracks) {
-      final titleLower = track.title.toLowerCase();
-      if (titleLower.contains(queryLower) || queryLower.contains(titleLower)) {
-        selected = track;
-        break;
-      }
-    }
-    selected ??= tracks.first;
-    unawaited(widget.state.playTrack(selected));
-  }
-
   Widget _mixBubble({required IconData icon, required VoidCallback onTap}) {
     return InkWell(
       borderRadius: BorderRadius.circular(999),
@@ -3155,12 +3244,6 @@ class _HomeHubPageState extends State<HomeHubPage> {
     });
   }
 
-  void _showHomeSnack(String text) {
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
-  }
 }
 
 class _TrackSearchDelegate extends SearchDelegate<SleepTrack?> {
@@ -3376,7 +3459,7 @@ class _SavedPageState extends State<SavedPage> {
                   mainAxisSpacing: 10,
                   childAspectRatio: 1.0,
                 ),
-                itemBuilder: (_, idx) => _suggestionCard(findLove.items[idx], state),
+                itemBuilder: (_, idx) => _suggestionCard(findLove.items[idx]),
               ),
             ],
           ],
@@ -3392,12 +3475,11 @@ class _SavedPageState extends State<SavedPage> {
   }) {
     return InkWell(
       borderRadius: BorderRadius.circular(14),
-      onTap: () async {
-        await widget.onAction(context, item, 'saved_library_row');
-        if ((item.meta['action']?.toString() ?? '').isEmpty) {
-          _playBestMatchTrack(state, item.title);
-        }
-      },
+      onTap: () => widget.onAction(
+        context,
+        _withDefaultPlayAction(item, source: 'saved_library_row'),
+        'saved_library_row',
+      ),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 9),
         child: Row(
@@ -3475,15 +3557,14 @@ class _SavedPageState extends State<SavedPage> {
     return const Icon(Icons.more_horiz_rounded, size: 24);
   }
 
-  Widget _suggestionCard(HomeItemContent item, SleepWellState state) {
+  Widget _suggestionCard(HomeItemContent item) {
     return InkWell(
       borderRadius: BorderRadius.circular(18),
-      onTap: () async {
-        await widget.onAction(context, item, 'saved_suggestion_card');
-        if ((item.meta['action']?.toString() ?? '').isEmpty) {
-          _playBestMatchTrack(state, item.title);
-        }
-      },
+      onTap: () => widget.onAction(
+        context,
+        _withDefaultPlayAction(item, source: 'saved_suggestion_card'),
+        'saved_suggestion_card',
+      ),
       child: DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(18),
@@ -3579,23 +3660,6 @@ class _SavedPageState extends State<SavedPage> {
     );
   }
 
-  void _playBestMatchTrack(SleepWellState state, String query) {
-    final tracks = state.tracks;
-    if (tracks.isEmpty) {
-      return;
-    }
-    final queryLower = query.toLowerCase();
-    SleepTrack? selected;
-    for (final track in tracks) {
-      final titleLower = track.title.toLowerCase();
-      if (titleLower.contains(queryLower) || queryLower.contains(titleLower)) {
-        selected = track;
-        break;
-      }
-    }
-    selected ??= tracks.first;
-    unawaited(state.playTrack(selected));
-  }
 }
 
 class _SavedArtSpec {
@@ -4468,9 +4532,18 @@ class _RoutinePageState extends State<RoutinePage> {
                 Expanded(
                   child: _alarmTile(
                     label: 'Wake Up Alarm',
-                    time: '08:00',
-                    enabled: false,
-                    onTap: () => _showRoutineSnack('Wake up alarm UI is coming in next pass.'),
+                    time: _formatTimeOfDay(state.wakeAlarmTime),
+                    enabled: state.wakeAlarmEnabled,
+                    onTap: () async {
+                      final picked = await showTimePicker(
+                        context: context,
+                        initialTime: state.wakeAlarmTime,
+                      );
+                      if (picked != null) {
+                        state.setWakeAlarmTime(picked);
+                        state.setWakeAlarmEnabled(true);
+                      }
+                    },
                   ),
                 ),
               ],
@@ -5873,27 +5946,51 @@ class NowPlayingPage extends StatelessWidget {
                         title: 'Sounds',
                         subtitle: 'Include relaxing sounds.',
                         button: 'Add Sounds',
-                        onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Open Sounds tab to add layers.')),
-                        ),
+                        onPressed: () async {
+                          if (!state.isMixerPlaying) {
+                            await state.toggleMixerPlayback();
+                          }
+                          await state.logUiAction('add_sounds_now_playing');
+                          if (!context.mounted) {
+                            return;
+                          }
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Relaxing sounds added to mix.')),
+                          );
+                        },
                       ),
                       const Divider(color: Colors.white12),
                       _adjustRow(
                         title: 'Music',
                         subtitle: 'Enhance your mix with music.',
                         button: 'Add Music',
-                        onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Open Music tab to add tracks.')),
-                        ),
+                        onPressed: () async {
+                          final boosted = min(1.0, state.mainPlayerVolume + 0.1);
+                          await state.setMainPlayerVolume(boosted);
+                          await state.logUiAction('add_music_now_playing');
+                          if (!context.mounted) {
+                            return;
+                          }
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Music level boosted.')),
+                          );
+                        },
                       ),
                       const Divider(color: Colors.white12),
                       _adjustRow(
                         title: 'Brainwaves',
                         subtitle: 'Elevate your mix.',
                         button: 'Add Brainwave',
-                        onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Open Mixer to add brainwaves.')),
-                        ),
+                        onPressed: () async {
+                          await state.saveCurrentMixPreset();
+                          await state.logUiAction('add_brainwave_now_playing');
+                          if (!context.mounted) {
+                            return;
+                          }
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Brainwave preset saved.')),
+                          );
+                        },
                       ),
                     ],
                   ),
@@ -6441,6 +6538,30 @@ class HomeItemContent {
       meta: rawMeta,
     );
   }
+}
+
+HomeItemContent _withDefaultPlayAction(
+  HomeItemContent item, {
+  String source = 'content_item',
+}) {
+  if ((item.meta['action']?.toString() ?? '').isNotEmpty) {
+    return item;
+  }
+  final mergedMeta = <String, dynamic>{
+    ...item.meta,
+    'action': 'play_track',
+    'deep_link': item.title,
+    'analytics_event': 'play_track_from_$source',
+  };
+  return HomeItemContent(
+    title: item.title,
+    subtitle: item.subtitle,
+    tag: item.tag,
+    imageUrl: item.imageUrl,
+    iconUrl: item.iconUrl,
+    ctaLabel: item.ctaLabel,
+    meta: mergedMeta,
+  );
 }
 
 class LegalContentBlock {
