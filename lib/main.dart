@@ -125,6 +125,16 @@ class _UiBaseline {
   static const double savedRowTitleSize = 17;
   static const double savedRowSubtitleSize = 14.5;
   static const double savedMiniPlayerBottomGap = 92;
+
+  static const double profileTitleSize = 36;
+  static const double profileHeroTitleSize = 40;
+  static const double profileNameSize = 22;
+  static const double profileAvatarSize = 92;
+  static const double profileCardRadius = 18;
+  static const double profileListRadius = 20;
+  static const double profileRowTitleSize = 16;
+  static const double profileActionPillHeight = 34;
+  static const double profileActionPillHorizontal = 14;
 }
 
 class SleepWellState extends ChangeNotifier {
@@ -2679,7 +2689,7 @@ class ProfilePage extends StatelessWidget {
         ),
         ListView(
           physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 190),
+          padding: const EdgeInsets.fromLTRB(_UiBaseline.pageHorizontal, 8, _UiBaseline.pageHorizontal, 190),
           children: [
             Row(
               children: [
@@ -2712,8 +2722,8 @@ class ProfilePage extends StatelessWidget {
               const SizedBox(height: 10),
               Center(
                 child: Container(
-                  width: 92,
-                  height: 92,
+                  width: _UiBaseline.profileAvatarSize,
+                  height: _UiBaseline.profileAvatarSize,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: Colors.white.withValues(alpha: 0.08),
@@ -2726,7 +2736,11 @@ class ProfilePage extends StatelessWidget {
               Center(
                 child: Text(
                   header.items.first.title,
-                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: -0.35),
+                  style: const TextStyle(
+                    fontSize: _UiBaseline.profileNameSize,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.35,
+                  ),
                 ),
               ),
             ],
@@ -2749,7 +2763,11 @@ class ProfilePage extends StatelessWidget {
               const SizedBox(height: 14),
               Text(
                 promo.title ?? 'Still waking up tired?',
-                style: const TextStyle(fontSize: 40, fontWeight: FontWeight.w800, letterSpacing: -0.45),
+                style: const TextStyle(
+                  fontSize: _UiBaseline.profileHeroTitleSize,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.45,
+                ),
               ),
               const SizedBox(height: 10),
               _betterHelpPromoCard(promo.items.first),
@@ -2758,7 +2776,11 @@ class ProfilePage extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 resources.title ?? 'BetterSleep Resources',
-                style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w800, letterSpacing: -0.4),
+                style: const TextStyle(
+                  fontSize: _UiBaseline.profileTitleSize,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.4,
+                ),
               ),
               const SizedBox(height: 10),
               _profileListCard(
@@ -2776,7 +2798,11 @@ class ProfilePage extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 account.title ?? 'Account',
-                style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w800, letterSpacing: -0.4),
+                style: const TextStyle(
+                  fontSize: _UiBaseline.profileTitleSize,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.4,
+                ),
               ),
               const SizedBox(height: 10),
               _profileListCard(
@@ -2800,7 +2826,7 @@ class ProfilePage extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(_UiBaseline.profileCardRadius),
         color: Colors.white.withValues(alpha: 0.04),
         border: Border.all(color: Colors.white10),
       ),
@@ -2858,7 +2884,7 @@ class ProfilePage extends StatelessWidget {
     return Container(
       padding: EdgeInsets.all(compact ? 12 : 14),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(_UiBaseline.profileCardRadius),
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -2899,7 +2925,7 @@ class ProfilePage extends StatelessWidget {
   Widget _profileListCard({required List<Widget> children}) {
     return Container(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(_UiBaseline.profileListRadius),
         color: Colors.white.withValues(alpha: 0.04),
         border: Border.all(color: Colors.white10),
       ),
@@ -2941,7 +2967,13 @@ class ProfilePage extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(item.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                    Text(
+                      item.title,
+                      style: const TextStyle(
+                        fontSize: _UiBaseline.profileRowTitleSize,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
                     if ((item.subtitle ?? '').isNotEmpty)
                       Text(item.subtitle!, style: const TextStyle(color: Colors.white70)),
                   ],
@@ -2953,7 +2985,8 @@ class ProfilePage extends StatelessWidget {
               ],
               if (showsBadge && badge.isNotEmpty)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                  constraints: const BoxConstraints(minHeight: _UiBaseline.profileActionPillHeight),
+                  padding: const EdgeInsets.symmetric(horizontal: _UiBaseline.profileActionPillHorizontal, vertical: 7),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(999),
                     color: Colors.white.withValues(alpha: 0.08),
