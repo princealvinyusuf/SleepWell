@@ -11,6 +11,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
+import 'package:url_launcher/url_launcher.dart';
 
 import 'features/common/ad_banner_slot.dart';
 
@@ -176,8 +177,11 @@ class SleepWellState extends ChangeNotifier {
   String? authToken;
   AppUserProfile? currentUser;
   final List<SavedContentItem> savedCloudItems = <SavedContentItem>[];
+  final Set<String> localFavoriteRefs = <String>{};
+  final Set<String> localDownloadRefs = <String>{};
   final List<Map<String, dynamic>> _queuedEvents = <Map<String, dynamic>>[];
   List<AdPlacementConfig> adPlacements = <AdPlacementConfig>[];
+  final Map<String, bool> settingsToggles = <String, bool>{};
   DateTime? lastSyncAt;
   String syncStatus = 'idle';
   int syncFailureCount = 0;
@@ -623,6 +627,123 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool isFavoriteTrack(SleepTrack track) {
+    final ref = '${track.id ?? track.title}';
+    if (localFavoriteRefs.contains(ref)) {
+      return true;
+    }
+    for (final item in savedCloudItems) {
+      if (item.itemType == 'favorites' && item.itemRef == ref) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<void> toggleFavoriteTrack(SleepTrack track) async {
+    final ref = '${track.id ?? track.title}';
+    final subtitle = '${track.category} • ${track.talking ? 'Talking' : 'No talking'}';
+    if (isFavoriteTrack(track)) {
+      localFavoriteRefs.remove(ref);
+      await _logEvent('favorite_remove');
+      await _persistLocalState();
+      notifyListeners();
+      return;
+    }
+
+    localFavoriteRefs.add(ref);
+    await _logEvent('favorite_add');
+    if (isAuthenticated) {
+      await upsertSavedItem(
+        itemType: 'favorites',
+        itemRef: ref,
+        title: track.title,
+        subtitle: subtitle,
+        refreshAfter: false,
+      );
+      await refreshCloudSavedItems();
+    }
+    await _persistLocalState();
+    notifyListeners();
+  }
+
+  bool isDownloadedTrack(SleepTrack track) {
+    final ref = '${track.id ?? track.title}';
+    if (localDownloadRefs.contains(ref)) {
+      return true;
+    }
+    for (final item in savedCloudItems) {
+      if (item.itemType == 'downloads' && item.itemRef == ref) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<void> saveDownloadTrack(SleepTrack track) async {
+    final ref = '${track.id ?? track.title}';
+    localDownloadRefs.add(ref);
+    if (isAuthenticated) {
+      await upsertSavedItem(
+        itemType: 'downloads',
+        itemRef: ref,
+        title: track.title,
+        subtitle: track.category,
+        refreshAfter: false,
+      );
+      await refreshCloudSavedItems();
+    }
+    await _logEvent('download_save');
+    await _persistLocalState();
+    notifyListeners();
+  }
+
+  Future<void> clearDownloads() async {
+    localDownloadRefs.clear();
+    if (isAuthenticated) {
+      final toDelete = savedCloudItems
+          .where((item) => item.itemType == 'downloads')
+          .map((item) => item.id)
+          .toList();
+      for (final id in toDelete) {
+        try {
+          await _api.deleteSavedItem(id);
+        } catch (_) {
+          // keep best effort deletion
+        }
+      }
+      await refreshCloudSavedItems();
+    }
+    await _persistLocalState();
+    notifyListeners();
+  }
+
+  Future<void> playRelativeTrack(int delta) async {
+    if (tracks.isEmpty) {
+      return;
+    }
+    final current = selectedTrack;
+    final currentIndex = current == null ? 0 : max(0, tracks.indexWhere((t) => (t.id ?? t.title) == (current.id ?? current.title)));
+    final nextIndex = (currentIndex + delta) % tracks.length;
+    final normalizedIndex = nextIndex < 0 ? nextIndex + tracks.length : nextIndex;
+    await playTrack(tracks[normalizedIndex]);
+    await _logEvent(delta > 0 ? 'skip_next' : 'skip_previous');
+  }
+
+  bool settingToggleValue(String key, {bool fallback = false}) {
+    return settingsToggles[key] ?? fallback;
+  }
+
+  Future<void> setSettingToggle(String key, bool value) async {
+    settingsToggles[key] = value;
+    await _persistLocalState();
+    notifyListeners();
+  }
+
+  Future<void> logUiAction(String eventType) async {
+    await _logEvent(eventType);
+  }
+
   void setSleepNowMixerEnabled(bool enabled) {
     enableMixerInSleepNow = enabled;
     unawaited(_persistLocalState());
@@ -796,6 +917,12 @@ class SleepWellState extends ChangeNotifier {
     }
     syncStatus = prefs.getString('sync_status') ?? syncStatus;
     syncFailureCount = prefs.getInt('sync_failure_count') ?? syncFailureCount;
+    localFavoriteRefs
+      ..clear()
+      ..addAll(prefs.getStringList('local_favorites') ?? const <String>[]);
+    localDownloadRefs
+      ..clear()
+      ..addAll(prefs.getStringList('local_downloads') ?? const <String>[]);
 
     preferredCategories
       ..clear()
@@ -811,6 +938,15 @@ class SleepWellState extends ChangeNotifier {
         for (final entry in decoded.entries) {
           mixer[entry.key] = _toDouble(entry.value).clamp(0.0, 1.0);
         }
+      }
+    }
+    final settingsRaw = prefs.getString('settings_toggles');
+    if (settingsRaw != null && settingsRaw.isNotEmpty) {
+      final decoded = jsonDecode(settingsRaw);
+      if (decoded is Map<String, dynamic>) {
+        settingsToggles
+          ..clear()
+          ..addAll(decoded.map((key, value) => MapEntry(key, value == true || value == 1)));
       }
     }
 
@@ -846,6 +982,9 @@ class SleepWellState extends ChangeNotifier {
       await prefs.remove('auth_user');
     }
     await prefs.setString('queued_events', jsonEncode(_queuedEvents));
+    await prefs.setStringList('local_favorites', localFavoriteRefs.toList());
+    await prefs.setStringList('local_downloads', localDownloadRefs.toList());
+    await prefs.setString('settings_toggles', jsonEncode(settingsToggles));
     await prefs.setString('sync_status', syncStatus);
     await prefs.setInt('sync_failure_count', syncFailureCount);
     if (lastSyncAt != null) {
@@ -985,6 +1124,14 @@ class SleepWellState extends ChangeNotifier {
       goal: selectedSleepGoal,
       timeSegment: _timeSegmentFor(DateTime.now()),
     );
+  }
+
+  Future<void> deleteSavedItem(int savedItemId) async {
+    await _api.deleteSavedItem(savedItemId);
+  }
+
+  Future<LegalContentDocument> fetchLegalDocument(String slug) {
+    return _api.fetchLegalDocument(slug);
   }
 
   bool adEnabled(String screen, String slotKey) {
@@ -1924,11 +2071,12 @@ class _HomeScreenState extends State<HomeScreen> {
           showProfile = false;
           showSettings = false;
         }),
+        onAction: _handleContentAction,
       ),
       PlayerPage(state: widget.state),
-      RoutinePage(state: widget.state),
-      InsightsPage(state: widget.state),
-      SavedPage(state: widget.state),
+      RoutinePage(state: widget.state, onAction: _handleContentAction),
+      InsightsPage(state: widget.state, onAction: _handleContentAction),
+      SavedPage(state: widget.state, onAction: _handleContentAction),
     ];
     return Scaffold(
       body: Stack(
@@ -1969,11 +2117,13 @@ class _HomeScreenState extends State<HomeScreen> {
                             ? SettingsPage(
                                 state: widget.state,
                                 onBack: () => setState(() => showSettings = false),
+                                onAction: _handleContentAction,
                               )
                             : ProfilePage(
                                 state: widget.state,
                                 onBack: () => setState(() => showProfile = false),
                                 onOpenSettings: () => setState(() => showSettings = true),
+                                onAction: _handleContentAction,
                               ))
                       : pages[index],
                 ),
@@ -2147,6 +2297,147 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
+
+  Future<void> _handleContentAction(
+    BuildContext context,
+    HomeItemContent item,
+    String source,
+  ) async {
+    final action = (item.meta['action']?.toString() ?? '').toLowerCase();
+    final target = item.meta['target']?.toString();
+    final targetTab = _nullableInt(item.meta['target_tab']);
+    final deepLink = item.meta['deep_link']?.toString();
+    final analyticsEvent = item.meta['analytics_event']?.toString();
+    if (analyticsEvent != null && analyticsEvent.isNotEmpty) {
+      await widget.state.logUiAction(analyticsEvent);
+    }
+
+    if (action == 'navigate_tab' && targetTab != null) {
+      setState(() {
+        index = targetTab.clamp(0, 4);
+        showProfile = false;
+        showSettings = false;
+      });
+      return;
+    }
+    if (action == 'open_profile') {
+      setState(() => showProfile = true);
+      return;
+    }
+    if (action == 'open_settings') {
+      setState(() {
+        showProfile = true;
+        showSettings = true;
+      });
+      return;
+    }
+    if (action == 'start_sleep_now') {
+      await widget.state.startSleepNow(entryPoint: source);
+      return;
+    }
+    if (action == 'play_track') {
+      final term = (deepLink?.isNotEmpty == true) ? deepLink! : item.title;
+      final track = _findTrackByText(widget.state, term);
+      if (track != null) {
+        await widget.state.playTrack(track);
+      }
+      return;
+    }
+    if (action == 'open_legal' && target != null && target.isNotEmpty) {
+      if (!context.mounted) {
+        return;
+      }
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => LegalContentPage(
+            state: widget.state,
+            slug: target,
+            title: item.title,
+          ),
+        ),
+      );
+      return;
+    }
+    if (action == 'rate_app') {
+      final uri = Uri.parse('https://play.google.com/store/apps/details?id=com.sleepwell.sleepwell');
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      return;
+    }
+    if (action == 'refresh_insights') {
+      setState(() {
+        index = 3;
+        showProfile = false;
+        showSettings = false;
+      });
+      await widget.state.refreshInsights();
+      return;
+    }
+    if (action == 'open_auth') {
+      setState(() => showProfile = true);
+      return;
+    }
+    if (action == 'clear_downloads') {
+      await widget.state.clearDownloads();
+      if (!context.mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Downloads cleared.')),
+      );
+      return;
+    }
+    if (action == 'change_language') {
+      if (!context.mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Language setting will be available soon.')),
+      );
+      return;
+    }
+    if (action == 'heart') {
+      final track = _findTrackByText(widget.state, item.title);
+      if (track != null) {
+        await widget.state.toggleFavoriteTrack(track);
+      }
+      return;
+    }
+    if (action == 'arrow' || action == 'more' || action == 'pill' || action == 'badge') {
+      final title = item.title.toLowerCase();
+      if (title.contains('alarm') || title.contains('bedtime') || title.contains('sleep goal')) {
+        setState(() {
+          index = 2;
+          showProfile = false;
+          showSettings = false;
+        });
+        return;
+      }
+      final track = _findTrackByText(widget.state, item.title);
+      if (track != null) {
+        await widget.state.playTrack(track);
+      }
+      return;
+    }
+
+    if (targetTab != null) {
+      setState(() {
+        index = targetTab.clamp(0, 4);
+        showProfile = false;
+        showSettings = false;
+      });
+      return;
+    }
+  }
+
+  SleepTrack? _findTrackByText(SleepWellState state, String text) {
+    final needle = text.toLowerCase();
+    for (final track in state.tracks) {
+      if (track.title.toLowerCase().contains(needle) || needle.contains(track.title.toLowerCase())) {
+        return track;
+      }
+    }
+    return state.tracks.isEmpty ? null : state.tracks.first;
+  }
 }
 
 class HomeHubPage extends StatefulWidget {
@@ -2155,10 +2446,12 @@ class HomeHubPage extends StatefulWidget {
     required this.state,
     required this.onOpenProfile,
     required this.onNavigateTab,
+    required this.onAction,
   });
   final SleepWellState state;
   final VoidCallback onOpenProfile;
   final ValueChanged<int> onNavigateTab;
+  final ContentActionHandler onAction;
 
   @override
   State<HomeHubPage> createState() => _HomeHubPageState();
@@ -2400,7 +2693,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
               final item = explore!.items[i];
               return InkWell(
                 borderRadius: BorderRadius.circular(14),
-                onTap: () => _handleExploreTap(item),
+                onTap: () => widget.onAction(context, item, 'home_explore_grid'),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     color: Colors.white.withValues(alpha: 0.04),
@@ -2463,7 +2756,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
               children: coloredNoises.items
                   .map(
                     (item) => ActionChip(
-                      onPressed: () => _playBestMatchTrack(item.title),
+                      onPressed: () => widget.onAction(context, item, 'home_colored_noise'),
                       label: Text(item.title),
                       avatar: const Icon(Icons.graphic_eq_rounded, size: 16),
                       backgroundColor: Colors.white.withValues(alpha: 0.06),
@@ -2480,7 +2773,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
             ...topRated.items.map(
               (item) => InkWell(
                 borderRadius: BorderRadius.circular(12),
-                onTap: () => _playBestMatchTrack(item.title),
+                onTap: () => widget.onAction(context, item, 'home_top_rated'),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 5),
                   child: Row(
@@ -2530,7 +2823,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
                     .map(
                       (item) => InkWell(
                         borderRadius: BorderRadius.circular(999),
-                        onTap: () => _playBestMatchTrack(item.title),
+                onTap: () => widget.onAction(context, item, 'home_try_something'),
                         child: Container(
                           margin: const EdgeInsets.only(right: 8),
                           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -2596,7 +2889,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
   Widget _heroCard({required HomeItemContent item}) {
     return InkWell(
       borderRadius: BorderRadius.circular(18),
-      onTap: () => _playBestMatchTrack(item.title),
+                onTap: () => widget.onAction(context, item, 'home_curated_playlist'),
       child: Container(
         width: 300,
         padding: const EdgeInsets.all(14),
@@ -2740,7 +3033,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
                   .map(
                     (item) => InkWell(
                       borderRadius: BorderRadius.circular(16),
-                      onTap: () => _playBestMatchTrack(item.title),
+                onTap: () => widget.onAction(context, item, 'home_sleep_hypnosis'),
                       child: Container(
                         width: 170,
                         margin: const EdgeInsets.only(right: 12),
@@ -2862,45 +3155,6 @@ class _HomeHubPageState extends State<HomeHubPage> {
     });
   }
 
-  void _handleExploreTap(HomeItemContent item) {
-    final action = '${item.meta['action'] ?? ''}'.toLowerCase();
-    final targetTab = _nullableInt(item.meta['target_tab']);
-    if (action == 'navigate_tab' && targetTab != null) {
-      widget.onNavigateTab(targetTab.clamp(0, 4));
-      return;
-    }
-    if (action == 'open_profile') {
-      widget.onOpenProfile();
-      return;
-    }
-    if (action == 'start_sleep_now') {
-      unawaited(widget.state.startSleepNow(entryPoint: 'home_explore_action'));
-      return;
-    }
-    if (action == 'open_insights') {
-      widget.onNavigateTab(3);
-      return;
-    }
-    if (action == 'open_routine') {
-      widget.onNavigateTab(2);
-      return;
-    }
-    if (action == 'open_saved') {
-      widget.onNavigateTab(4);
-      return;
-    }
-    if (action == 'open_sounds') {
-      widget.onNavigateTab(1);
-      return;
-    }
-    final deepLink = item.meta['deep_link']?.toString();
-    if (action == 'play_track' && deepLink != null && deepLink.isNotEmpty) {
-      _playBestMatchTrack(deepLink);
-      return;
-    }
-    _playBestMatchTrack(item.title);
-  }
-
   void _showHomeSnack(String text) {
     if (!mounted) {
       return;
@@ -2978,8 +3232,9 @@ class _TrackSearchDelegate extends SearchDelegate<SleepTrack?> {
 }
 
 class SavedPage extends StatefulWidget {
-  const SavedPage({super.key, required this.state});
+  const SavedPage({super.key, required this.state, required this.onAction});
   final SleepWellState state;
+  final ContentActionHandler onAction;
 
   @override
   State<SavedPage> createState() => _SavedPageState();
@@ -3137,7 +3392,12 @@ class _SavedPageState extends State<SavedPage> {
   }) {
     return InkWell(
       borderRadius: BorderRadius.circular(14),
-      onTap: () => _playBestMatchTrack(state, item.title),
+      onTap: () async {
+        await widget.onAction(context, item, 'saved_library_row');
+        if ((item.meta['action']?.toString() ?? '').isEmpty) {
+          _playBestMatchTrack(state, item.title);
+        }
+      },
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 9),
         child: Row(
@@ -3218,7 +3478,12 @@ class _SavedPageState extends State<SavedPage> {
   Widget _suggestionCard(HomeItemContent item, SleepWellState state) {
     return InkWell(
       borderRadius: BorderRadius.circular(18),
-      onTap: () => _playBestMatchTrack(state, item.title),
+      onTap: () async {
+        await widget.onAction(context, item, 'saved_suggestion_card');
+        if ((item.meta['action']?.toString() ?? '').isEmpty) {
+          _playBestMatchTrack(state, item.title);
+        }
+      },
       child: DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(18),
@@ -3351,11 +3616,13 @@ class ProfilePage extends StatelessWidget {
     required this.state,
     required this.onBack,
     required this.onOpenSettings,
+    required this.onAction,
   });
 
   final SleepWellState state;
   final VoidCallback onBack;
   final VoidCallback onOpenSettings;
+  final ContentActionHandler onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -3442,6 +3709,7 @@ class ProfilePage extends StatelessWidget {
               _profileListCard(
                 children: [
                   _profileRow(
+                    context: context,
                     item: chronotype.items.first,
                     leadingIcon: Icons.auto_awesome_rounded,
                   ),
@@ -3485,6 +3753,7 @@ class ProfilePage extends StatelessWidget {
                 children: resources.items
                     .map(
                       (item) => _profileRow(
+                        context: context,
                         item: item,
                         showDivider: item != resources.items.last,
                       ),
@@ -3507,6 +3776,7 @@ class ProfilePage extends StatelessWidget {
                 children: account.items
                     .map(
                       (item) => _profileRow(
+                        context: context,
                         item: item,
                         showDivider: item != account.items.last,
                       ),
@@ -3741,6 +4011,7 @@ class ProfilePage extends StatelessWidget {
   }
 
   Widget _profileRow({
+    required BuildContext context,
     required HomeItemContent item,
     bool showDivider = false,
     IconData? leadingIcon,
@@ -3753,9 +4024,12 @@ class ProfilePage extends StatelessWidget {
 
     return Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
-          child: Row(
+        InkWell(
+          onTap: () => onAction(context, item, 'profile_row'),
+          borderRadius: BorderRadius.circular(14),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
+            child: Row(
             children: [
               if (leadingIcon != null) ...[
                 Container(
@@ -3803,6 +4077,7 @@ class ProfilePage extends StatelessWidget {
                 ),
               if (showsArrow) const Icon(Icons.chevron_right_rounded, color: Colors.white70),
             ],
+            ),
           ),
         ),
         if (showDivider) const Divider(height: 1, color: Colors.white10),
@@ -3816,18 +4091,18 @@ class SettingsPage extends StatefulWidget {
     super.key,
     required this.state,
     required this.onBack,
+    required this.onAction,
   });
 
   final SleepWellState state;
   final VoidCallback onBack;
+  final ContentActionHandler onAction;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  final Map<String, bool> _toggles = <String, bool>{};
-
   @override
   Widget build(BuildContext context) {
     final main = widget.state.sectionByKey('profile_settings_main');
@@ -3895,11 +4170,17 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _settingsRow(HomeItemContent item) {
     final action = (item.meta['action']?.toString() ?? '').toLowerCase();
     final isToggle = action == 'toggle';
-    final current = _toggles[item.title] ?? (item.meta['enabled'] == true);
+    final current = widget.state.settingToggleValue(
+      item.title,
+      fallback: item.meta['enabled'] == true,
+    );
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: _UiBaseline.settingsRowVertical),
-      child: Row(
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: isToggle ? null : () => widget.onAction(context, item, 'settings_row'),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: _UiBaseline.settingsRowVertical),
+        child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Expanded(
@@ -3929,7 +4210,7 @@ class _SettingsPageState extends State<SettingsPage> {
               scale: _UiBaseline.settingsToggleScale,
               child: Switch(
                 value: current,
-                onChanged: (value) => setState(() => _toggles[item.title] = value),
+                onChanged: (value) => widget.state.setSettingToggle(item.title, value),
                 activeTrackColor: Colors.white,
                 inactiveTrackColor: Colors.white24,
                 activeColor: Colors.black,
@@ -3939,6 +4220,7 @@ class _SettingsPageState extends State<SettingsPage> {
           else
             const Icon(Icons.chevron_right_rounded, color: Colors.white70),
         ],
+        ),
       ),
     );
   }
@@ -3968,9 +4250,137 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
-class RoutinePage extends StatefulWidget {
-  const RoutinePage({super.key, required this.state});
+class LegalContentPage extends StatefulWidget {
+  const LegalContentPage({
+    super.key,
+    required this.state,
+    required this.slug,
+    required this.title,
+  });
+
   final SleepWellState state;
+  final String slug;
+  final String title;
+
+  @override
+  State<LegalContentPage> createState() => _LegalContentPageState();
+}
+
+class _LegalContentPageState extends State<LegalContentPage> {
+  late Future<LegalContentDocument> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = widget.state.fetchLegalDocument(widget.slug);
+  }
+
+  void _retry() {
+    setState(() {
+      _future = widget.state.fetchLegalDocument(widget.slug);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0B1020),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0B1020),
+        title: Text(widget.title),
+      ),
+      body: FutureBuilder<LegalContentDocument>(
+        future: _future,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError || !snapshot.hasData) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Unable to load this page right now.',
+                      style: TextStyle(fontSize: 16, color: Colors.white70),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      onPressed: _retry,
+                      child: const Text('Try again'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+
+          final doc = snapshot.data!;
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 18, 16, 22),
+            children: [
+              Text(
+                doc.title.isEmpty ? widget.title : doc.title,
+                style: const TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              if ((doc.updatedAt ?? '').isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Last updated: ${doc.updatedAt}',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12.5),
+                ),
+              ],
+              const SizedBox(height: 16),
+              ...doc.blocks.map((block) {
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        block.heading,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        block.body,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14.5,
+                          height: 1.45,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class RoutinePage extends StatefulWidget {
+  const RoutinePage({super.key, required this.state, required this.onAction});
+  final SleepWellState state;
+  final ContentActionHandler onAction;
 
   @override
   State<RoutinePage> createState() => _RoutinePageState();
@@ -4151,7 +4561,11 @@ class _RoutinePageState extends State<RoutinePage> {
                         foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                       ),
-                      onPressed: () => _showRoutineSnack('Explore more routines from Sounds tab.'),
+                      onPressed: () => widget.onAction(
+                        context,
+                        recommendation.items.first,
+                        'routine_recommendation',
+                      ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -4999,11 +5413,11 @@ class TrackDetailPage extends StatefulWidget {
 }
 
 class _TrackDetailPageState extends State<TrackDetailPage> {
-  bool repeat = false;
-  bool closeAfter = true;
-
   @override
   Widget build(BuildContext context) {
+    final isFavorite = widget.state.isFavoriteTrack(widget.track);
+    final isDownloaded = widget.state.isDownloadedTrack(widget.track);
+    final closeAfter = widget.state.settingToggleValue('Close app after ending', fallback: true);
     return Scaffold(
       body: Stack(
         children: [
@@ -5031,11 +5445,58 @@ class _TrackDetailPageState extends State<TrackDetailPage> {
                   children: [
                     IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
                     const Spacer(),
-                    const Icon(Icons.cloud_download_outlined),
+                    IconButton(
+                      icon: Icon(
+                        isDownloaded ? Icons.download_done_rounded : Icons.cloud_download_outlined,
+                      ),
+                      onPressed: () async {
+                        await widget.state.saveDownloadTrack(widget.track);
+                        if (!context.mounted) {
+                          return;
+                        }
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Saved to downloads')),
+                        );
+                      },
+                    ),
                     const SizedBox(width: 18),
-                    const Icon(Icons.favorite_border_rounded),
+                    IconButton(
+                      icon: Icon(isFavorite ? Icons.favorite_rounded : Icons.favorite_border_rounded),
+                      onPressed: () async {
+                        await widget.state.toggleFavoriteTrack(widget.track);
+                        if (!context.mounted) {
+                          return;
+                        }
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              widget.state.isFavoriteTrack(widget.track)
+                                  ? 'Added to favorites'
+                                  : 'Removed from favorites',
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                     const SizedBox(width: 18),
-                    const Icon(Icons.add),
+                    IconButton(
+                      icon: const Icon(Icons.add),
+                      onPressed: () async {
+                        await widget.state.upsertSavedItem(
+                          itemType: 'playlists',
+                          itemRef: '${widget.track.id ?? widget.track.title}',
+                          title: widget.track.title,
+                          subtitle: 'Saved from track detail',
+                          refreshAfter: false,
+                        );
+                        if (!context.mounted) {
+                          return;
+                        }
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Added to playlists')),
+                        );
+                      },
+                    ),
                   ],
                 ),
                 const SizedBox(height: 6),
@@ -5065,6 +5526,7 @@ class _TrackDetailPageState extends State<TrackDetailPage> {
                           child: FilledButton(
                             style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
                             onPressed: () async {
+                              await widget.state.logUiAction('track_detail_play');
                               await widget.state.playTrack(widget.track);
                               if (!context.mounted) {
                                 return;
@@ -5116,12 +5578,17 @@ class _TrackDetailPageState extends State<TrackDetailPage> {
                 const SizedBox(height: 14),
                 _settingRow(icon: Icons.music_note, title: 'Mixes', value: 'None'),
                 _settingRow(icon: Icons.alarm, title: 'Keep music playing', value: 'Until meditation ends'),
-                _toggleRow(icon: Icons.repeat, title: 'Repeat meditation', value: repeat, onChanged: (v) => setState(() => repeat = v)),
+                _toggleRow(
+                  icon: Icons.repeat,
+                  title: 'Repeat meditation',
+                  value: widget.state.loop,
+                  onChanged: (v) async => widget.state.setLoopEnabled(v),
+                ),
                 _toggleRow(
                   icon: Icons.exit_to_app_outlined,
                   title: 'Close app after ending',
                   value: closeAfter,
-                  onChanged: (v) => setState(() => closeAfter = v),
+                  onChanged: (v) async => widget.state.setSettingToggle('Close app after ending', v),
                 ),
               ],
             ),
@@ -5182,6 +5649,7 @@ class NowPlayingPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isFavorite = state.isFavoriteTrack(track);
     final duration = state.currentDuration.inMilliseconds <= 0
         ? Duration(seconds: max(track.durationSeconds, 1))
         : state.currentDuration;
@@ -5265,6 +5733,9 @@ class NowPlayingPage extends StatelessWidget {
                             final target = Duration(milliseconds: value.round());
                             await state.seekTo(target);
                           },
+                          onChangeEnd: (_) async {
+                            await state.logUiAction('seek_track_position');
+                          },
                         ),
                       ),
                       Row(
@@ -5279,7 +5750,23 @@ class NowPlayingPage extends StatelessWidget {
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
                           const Icon(Icons.more_horiz, size: 30),
-                          const Icon(Icons.skip_previous_rounded, color: Colors.white38, size: 34),
+                          IconButton(
+                            icon: const Icon(Icons.skip_previous_rounded, size: 34),
+                            onPressed: () async {
+                              await state.playRelativeTrack(-1);
+                              if (!context.mounted) {
+                                return;
+                              }
+                              Navigator.of(context).pushReplacement(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => NowPlayingPage(
+                                    state: state,
+                                    track: state.selectedTrack ?? track,
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                           IconButton(
                             iconSize: _UiBaseline.nowPlayingMainButton,
                             icon: CircleAvatar(
@@ -5293,21 +5780,41 @@ class NowPlayingPage extends StatelessWidget {
                             ),
                             onPressed: () async => state.togglePlayPause(),
                           ),
-                          const Icon(Icons.skip_next_rounded, size: 34),
                           IconButton(
-                            icon: const Icon(Icons.favorite_border_rounded, size: 30),
+                            icon: const Icon(Icons.skip_next_rounded, size: 34),
                             onPressed: () async {
-                              await state.upsertSavedItem(
-                                itemType: 'favorites',
-                                itemRef: '${track.id ?? track.title}',
-                                title: track.title,
-                                subtitle: '${track.category} • ${track.talking ? 'Talking' : 'No talking'}',
+                              await state.playRelativeTrack(1);
+                              if (!context.mounted) {
+                                return;
+                              }
+                              Navigator.of(context).pushReplacement(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => NowPlayingPage(
+                                    state: state,
+                                    track: state.selectedTrack ?? track,
+                                  ),
+                                ),
                               );
+                            },
+                          ),
+                          IconButton(
+                            icon: Icon(
+                              isFavorite ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                              size: 30,
+                            ),
+                            onPressed: () async {
+                              await state.toggleFavoriteTrack(track);
                               if (!context.mounted) {
                                 return;
                               }
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Added to favorites')),
+                                SnackBar(
+                                  content: Text(
+                                    state.isFavoriteTrack(track)
+                                        ? 'Added to favorites'
+                                        : 'Removed from favorites',
+                                  ),
+                                ),
                               );
                             },
                           ),
@@ -5323,6 +5830,7 @@ class NowPlayingPage extends StatelessWidget {
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
                           ),
                           onPressed: () async {
+                            await state.logUiAction('track_my_sleep_now_playing');
                             await state.startSleepNow(entryPoint: 'track_detail_track_sleep');
                             if (!context.mounted) {
                               return;
@@ -5511,8 +6019,9 @@ class MixerPage extends StatelessWidget {
 }
 
 class InsightsPage extends StatelessWidget {
-  const InsightsPage({super.key, required this.state});
+  const InsightsPage({super.key, required this.state, required this.onAction});
   final SleepWellState state;
+  final ContentActionHandler onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -5609,15 +6118,7 @@ class InsightsPage extends StatelessWidget {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                         minimumSize: const Size(140, 44),
                       ),
-                      onPressed: () async {
-                        await state.startSleepNow(entryPoint: 'insight_snore_track_sleep');
-                        if (!context.mounted) {
-                          return;
-                        }
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Sleep tracking started.')),
-                        );
-                      },
+                      onPressed: () => onAction(context, snoreItem ?? const HomeItemContent(title: 'Track my sleep'), 'insight_snore'),
                       child: Text(snoreItem?.ctaLabel ?? 'Track my sleep'),
                     ),
                   ],
@@ -5660,15 +6161,7 @@ class InsightsPage extends StatelessWidget {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                         minimumSize: const Size(140, 44),
                       ),
-                      onPressed: () async {
-                        await state.refreshInsights();
-                        if (!context.mounted) {
-                          return;
-                        }
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Insights refreshed from latest sessions.')),
-                        );
-                      },
+                      onPressed: () => onAction(context, phasesItem ?? const HomeItemContent(title: 'Learn more'), 'insight_phases'),
                       child: Text(phasesItem?.ctaLabel ?? 'Learn more'),
                     ),
                   ],
@@ -5950,6 +6443,53 @@ class HomeItemContent {
   }
 }
 
+class LegalContentBlock {
+  const LegalContentBlock({
+    required this.heading,
+    required this.body,
+    required this.section,
+  });
+
+  final String heading;
+  final String body;
+  final String section;
+
+  factory LegalContentBlock.fromJson(Map<String, dynamic> json) {
+    return LegalContentBlock(
+      heading: '${json['heading'] ?? ''}',
+      body: '${json['body'] ?? ''}',
+      section: '${json['section'] ?? ''}',
+    );
+  }
+}
+
+class LegalContentDocument {
+  const LegalContentDocument({
+    required this.slug,
+    required this.title,
+    required this.blocks,
+    this.updatedAt,
+  });
+
+  final String slug;
+  final String title;
+  final String? updatedAt;
+  final List<LegalContentBlock> blocks;
+
+  factory LegalContentDocument.fromJson(Map<String, dynamic> json) {
+    final rawBlocks = (json['blocks'] as List<dynamic>? ?? <dynamic>[]);
+    return LegalContentDocument(
+      slug: '${json['slug'] ?? ''}',
+      title: '${json['title'] ?? ''}',
+      updatedAt: json['updated_at']?.toString(),
+      blocks: rawBlocks
+          .whereType<Map<String, dynamic>>()
+          .map(LegalContentBlock.fromJson)
+          .toList(),
+    );
+  }
+}
+
 class OnboardingStepContent {
   const OnboardingStepContent({
     required this.stepKey,
@@ -6044,6 +6584,12 @@ OnboardingStatCard _coerceStatCard(dynamic item) {
 }
 
 const String _fallbackAudioUrl = 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3';
+
+typedef ContentActionHandler = Future<void> Function(
+  BuildContext context,
+  HomeItemContent item,
+  String source,
+);
 const Map<String, String> _mixerChannelUrls = <String, String>{
   'Rain': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
   'Wind': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
@@ -6977,6 +7523,10 @@ class SleepWellApi {
     );
   }
 
+  Future<void> deleteSavedItem(int savedItemId) async {
+    await _request('DELETE', '/saved-items/$savedItemId');
+  }
+
   Future<List<SleepTrack>> searchTracks(
     String query, {
     String? deviceId,
@@ -7008,6 +7558,11 @@ class SleepWellApi {
         .whereType<Map<String, dynamic>>()
         .map(AdPlacementConfig.fromJson)
         .toList();
+  }
+
+  Future<LegalContentDocument> fetchLegalDocument(String slug) async {
+    final json = await _request('GET', '/legal/${Uri.encodeComponent(slug)}');
+    return LegalContentDocument.fromJson(json);
   }
 
   Future<Map<String, dynamic>> _request(
