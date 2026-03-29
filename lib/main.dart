@@ -4,17 +4,25 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:timezone/data/latest.dart' as tzdata;
+import 'package:timezone/timezone.dart' as tz;
+
+import 'features/common/ad_banner_slot.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  tzdata.initializeTimeZones();
   await JustAudioBackground.init(
     androidNotificationChannelId: 'com.sleepwell.audio',
     androidNotificationChannelName: 'SleepWell Playback',
     androidNotificationOngoing: true,
   );
+  await MobileAds.instance.initialize();
   runApp(const SleepWellApp());
 }
 
@@ -135,6 +143,11 @@ class _UiBaseline {
   static const double profileRowTitleSize = 16;
   static const double profileActionPillHeight = 34;
   static const double profileActionPillHorizontal = 14;
+
+  static const double settingsTitleSize = 34;
+  static const double settingsCardRadius = 22;
+  static const double settingsRowVertical = 16;
+  static const double settingsToggleScale = 0.86;
 }
 
 class SleepWellState extends ChangeNotifier {
@@ -153,12 +166,18 @@ class SleepWellState extends ChangeNotifier {
   StreamSubscription<PlayerState>? _playerStateSubscription;
   Timer? _sleepTimer;
   Timer? _bedtimeTicker;
+  final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
 
   bool isBootstrapping = true;
   bool isBusy = false;
   bool apiConnected = false;
   String? lastError;
   String deviceId = SleepWellApi.defaultDeviceId;
+  String? authToken;
+  AppUserProfile? currentUser;
+  final List<SavedContentItem> savedCloudItems = <SavedContentItem>[];
+  final List<Map<String, dynamic>> _queuedEvents = <Map<String, dynamic>>[];
+  List<AdPlacementConfig> adPlacements = <AdPlacementConfig>[];
 
   bool isOnboarded = false;
   bool prefersTalking = false;
@@ -202,6 +221,8 @@ class SleepWellState extends ChangeNotifier {
   );
   List<OnboardingStepContent> onboardingScreens = <OnboardingStepContent>[];
 
+  bool get isAuthenticated => authToken != null && currentUser != null;
+
   List<SleepTrack> tracks = <SleepTrack>[
     const SleepTrack(
       title: 'Moonlight Whispers',
@@ -238,13 +259,23 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
     _prefs = await SharedPreferences.getInstance();
     _restoreLocalState();
+    await _initNotifications();
     await _configureAudio();
     await fetchOnboardingContent();
     await fetchCatalog();
     await fetchHomeFeed();
+    await fetchAdPlacements();
+    if (authToken != null) {
+      _api.setAuthToken(authToken);
+      await hydrateProfile();
+      await refreshCloudSavedItems();
+    }
     await refreshInsights();
     await refreshMixPresets();
     _startBedtimeTicker();
+    if (bedtimeRoutineEnabled) {
+      await _scheduleBedtimeNotification();
+    }
     isBootstrapping = false;
     notifyListeners();
   }
@@ -383,6 +414,16 @@ class SleepWellState extends ChangeNotifier {
     await _startSession(mode: 'player', entryPoint: 'player_track_tap');
     await _playSelectedTrack();
     await _logEvent('play');
+    if (isAuthenticated) {
+      unawaited(
+        upsertSavedItem(
+          itemType: 'recently_played',
+          itemRef: '${track.id ?? track.title}',
+          title: track.title,
+          subtitle: '${track.category} • ${track.talking ? 'Talking' : 'No talking'}',
+        ),
+      );
+    }
     notifyListeners();
   }
 
@@ -501,7 +542,9 @@ class SleepWellState extends ChangeNotifier {
 
   Future<void> refreshMixPresets() async {
     try {
-      mixerPresets = await _api.fetchMixPresets(deviceId: deviceId);
+      mixerPresets = isAuthenticated
+          ? await _api.fetchMixPresetsForUser()
+          : await _api.fetchMixPresets(deviceId: deviceId);
       apiConnected = true;
     } catch (_) {
       apiConnected = false;
@@ -564,6 +607,9 @@ class SleepWellState extends ChangeNotifier {
     bedtimeRoutineEnabled = enabled;
     if (enabled) {
       lastError = 'Bedtime routine set for ${_formatTimeOfDay(bedtimeTime)}.';
+      unawaited(_scheduleBedtimeNotification());
+    } else {
+      unawaited(_cancelBedtimeNotification());
     }
     unawaited(_persistLocalState());
     notifyListeners();
@@ -572,6 +618,9 @@ class SleepWellState extends ChangeNotifier {
   void setBedtimeTime(TimeOfDay value) {
     bedtimeTime = value;
     lastError = 'Bedtime updated to ${_formatTimeOfDay(value)}.';
+    if (bedtimeRoutineEnabled) {
+      unawaited(_scheduleBedtimeNotification());
+    }
     unawaited(_persistLocalState());
     notifyListeners();
   }
@@ -595,7 +644,9 @@ class SleepWellState extends ChangeNotifier {
 
   Future<void> refreshInsights() async {
     try {
-      insights = await _api.fetchInsights(deviceId: deviceId);
+      insights = isAuthenticated
+          ? await _api.fetchInsightsForUser()
+          : await _api.fetchInsights(deviceId: deviceId);
       apiConnected = true;
       lastError = null;
     } catch (_) {
@@ -645,8 +696,17 @@ class SleepWellState extends ChangeNotifier {
         trackId: selectedTrack?.id,
       );
       apiConnected = true;
+      if (_queuedEvents.isNotEmpty) {
+        await _flushQueuedEvents();
+      }
     } catch (_) {
       apiConnected = false;
+      _queuedEvents.add(<String, dynamic>{
+        'session_id': _activeSessionId,
+        'event_type': eventType,
+        'track_id': selectedTrack?.id,
+      });
+      unawaited(_persistLocalState());
     }
   }
 
@@ -666,6 +726,23 @@ class SleepWellState extends ChangeNotifier {
     final bedtimeMinute = prefs.getInt('bedtime_minute') ?? bedtimeTime.minute;
     bedtimeTime = TimeOfDay(hour: bedtimeHour, minute: bedtimeMinute);
     selectedSleepGoal = prefs.getString('selected_sleep_goal') ?? selectedSleepGoal;
+    authToken = prefs.getString('auth_token');
+    final userRaw = prefs.getString('auth_user');
+    if (userRaw != null && userRaw.isNotEmpty) {
+      final decoded = jsonDecode(userRaw);
+      if (decoded is Map<String, dynamic>) {
+        currentUser = AppUserProfile.fromJson(decoded);
+      }
+    }
+    final queuedRaw = prefs.getString('queued_events');
+    if (queuedRaw != null && queuedRaw.isNotEmpty) {
+      final decoded = jsonDecode(queuedRaw);
+      if (decoded is List) {
+        _queuedEvents
+          ..clear()
+          ..addAll(decoded.whereType<Map<String, dynamic>>());
+      }
+    }
 
     preferredCategories
       ..clear()
@@ -705,6 +782,188 @@ class SleepWellState extends ChangeNotifier {
     await prefs.setInt('bedtime_minute', bedtimeTime.minute);
     await prefs.setString('selected_sleep_goal', selectedSleepGoal);
     await prefs.setString('mixer_state', jsonEncode(mixer));
+    if (authToken != null) {
+      await prefs.setString('auth_token', authToken!);
+    } else {
+      await prefs.remove('auth_token');
+    }
+    if (currentUser != null) {
+      await prefs.setString('auth_user', jsonEncode(currentUser!.toJson()));
+    } else {
+      await prefs.remove('auth_user');
+    }
+    await prefs.setString('queued_events', jsonEncode(_queuedEvents));
+  }
+
+  Future<void> registerWithEmail({
+    required String name,
+    required String email,
+    required String password,
+  }) async {
+    final result = await _api.register(
+      name: name,
+      email: email,
+      password: password,
+      deviceId: deviceId,
+    );
+    authToken = result.token;
+    currentUser = result.user;
+    _api.setAuthToken(authToken);
+    await _syncAnonymousStateToCloud();
+    await _persistLocalState();
+    await refreshMixPresets();
+    await refreshInsights();
+    await refreshCloudSavedItems();
+    notifyListeners();
+  }
+
+  Future<void> loginWithEmail({
+    required String email,
+    required String password,
+  }) async {
+    final result = await _api.login(
+      email: email,
+      password: password,
+      deviceId: deviceId,
+    );
+    authToken = result.token;
+    currentUser = result.user;
+    _api.setAuthToken(authToken);
+    await _syncAnonymousStateToCloud();
+    await _persistLocalState();
+    await refreshMixPresets();
+    await refreshInsights();
+    await refreshCloudSavedItems();
+    notifyListeners();
+  }
+
+  Future<void> hydrateProfile() async {
+    if (authToken == null) {
+      return;
+    }
+    try {
+      currentUser = await _api.fetchMe();
+      apiConnected = true;
+    } catch (_) {
+      apiConnected = false;
+    }
+    notifyListeners();
+  }
+
+  Future<void> logoutAccount() async {
+    try {
+      await _api.logout();
+    } catch (_) {
+      // no-op; local logout still applies
+    }
+    authToken = null;
+    currentUser = null;
+    _api.setAuthToken(null);
+    await _persistLocalState();
+    notifyListeners();
+  }
+
+  Future<void> refreshCloudSavedItems() async {
+    if (!isAuthenticated) {
+      return;
+    }
+    try {
+      savedCloudItems
+        ..clear()
+        ..addAll(await _api.fetchSavedItems());
+      apiConnected = true;
+    } catch (_) {
+      apiConnected = false;
+    }
+    notifyListeners();
+  }
+
+  Future<void> upsertSavedItem({
+    required String itemType,
+    required String itemRef,
+    required String title,
+    String? subtitle,
+    Map<String, dynamic> meta = const <String, dynamic>{},
+    bool refreshAfter = true,
+  }) async {
+    if (!isAuthenticated) {
+      return;
+    }
+    await _api.upsertSavedItem(
+      itemType: itemType,
+      itemRef: itemRef,
+      title: title,
+      subtitle: subtitle,
+      meta: meta,
+    );
+    if (refreshAfter) {
+      await refreshCloudSavedItems();
+    }
+  }
+
+  Future<void> fetchAdPlacements() async {
+    try {
+      adPlacements = await _api.fetchAdPlacements();
+    } catch (_) {
+      adPlacements = const <AdPlacementConfig>[];
+    }
+    notifyListeners();
+  }
+
+  bool adEnabled(String screen, String slotKey) {
+    for (final placement in adPlacements) {
+      if (placement.screen == screen &&
+          placement.slotKey == slotKey &&
+          placement.enabled) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<void> _flushQueuedEvents() async {
+    if (_queuedEvents.isEmpty) {
+      return;
+    }
+    final pending = List<Map<String, dynamic>>.from(_queuedEvents);
+    _queuedEvents.clear();
+    for (final event in pending) {
+      final sessionId = _nullableInt(event['session_id']);
+      if (sessionId == null) {
+        continue;
+      }
+      try {
+        await _api.addSessionEvent(
+          sessionId: sessionId,
+          eventType: '${event['event_type'] ?? 'event'}',
+          trackId: _nullableInt(event['track_id']),
+        );
+      } catch (_) {
+        _queuedEvents.add(event);
+      }
+    }
+    await _persistLocalState();
+  }
+
+  Future<void> _syncAnonymousStateToCloud() async {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    for (final session in sessions.take(12)) {
+      await upsertSavedItem(
+        itemType: 'history_snapshot',
+        itemRef: session.startedAt.toIso8601String(),
+        title: 'Session ${session.startedAt.toIso8601String().split('T').first}',
+        subtitle: '${session.durationMinutes} min',
+        meta: <String, dynamic>{
+          'started_at': session.startedAt.toIso8601String(),
+          'duration_minutes': session.durationMinutes,
+        },
+        refreshAfter: false,
+      );
+    }
+    await refreshCloudSavedItems();
   }
 
   Future<void> _configureAudio() async {
@@ -781,6 +1040,53 @@ class SleepWellState extends ChangeNotifier {
         lastError = 'Playback failed. Check your internet connection.';
       }
     }
+  }
+
+  Future<void> _initNotifications() async {
+    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const ios = DarwinInitializationSettings();
+    const settings = InitializationSettings(android: android, iOS: ios);
+    await _notifications.initialize(settings);
+  }
+
+  Future<void> _scheduleBedtimeNotification() async {
+    await _cancelBedtimeNotification();
+    final now = tz.TZDateTime.now(tz.local);
+    var scheduled = tz.TZDateTime(
+      tz.local,
+      now.year,
+      now.month,
+      now.day,
+      bedtimeTime.hour,
+      bedtimeTime.minute,
+    );
+    if (scheduled.isBefore(now)) {
+      scheduled = scheduled.add(const Duration(days: 1));
+    }
+    await _notifications.zonedSchedule(
+      1122,
+      'SleepWell bedtime',
+      'Time to start your routine and relax for sleep.',
+      scheduled,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'sleepwell_bedtime',
+          'SleepWell Bedtime',
+          channelDescription: 'Daily bedtime reminder',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+        iOS: DarwinNotificationDetails(),
+      ),
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      matchDateTimeComponents: DateTimeComponents.time,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+    );
+  }
+
+  Future<void> _cancelBedtimeNotification() async {
+    await _notifications.cancel(1122);
   }
 
   Future<void> _scheduleSleepTimer() async {
@@ -1465,6 +1771,11 @@ class _HomeScreenState extends State<HomeScreen> {
       HomeHubPage(
         state: widget.state,
         onOpenProfile: () => setState(() => showProfile = true),
+        onNavigateTab: (tabIndex) => setState(() {
+          index = tabIndex;
+          showProfile = false;
+          showSettings = false;
+        }),
       ),
       PlayerPage(state: widget.state),
       RoutinePage(state: widget.state),
@@ -1695,9 +2006,11 @@ class HomeHubPage extends StatefulWidget {
     super.key,
     required this.state,
     required this.onOpenProfile,
+    required this.onNavigateTab,
   });
   final SleepWellState state;
   final VoidCallback onOpenProfile;
+  final ValueChanged<int> onNavigateTab;
 
   @override
   State<HomeHubPage> createState() => _HomeHubPageState();
@@ -1754,7 +2067,10 @@ class _HomeHubPageState extends State<HomeHubPage> {
                   style: TextStyle(fontSize: 38, fontWeight: FontWeight.w800),
                 ),
               ),
-              IconButton(onPressed: () {}, icon: const Icon(Icons.search_rounded)),
+              IconButton(
+                onPressed: _openTrackSearch,
+                icon: const Icon(Icons.search_rounded),
+              ),
               IconButton(
                 onPressed: widget.onOpenProfile,
                 icon: const Icon(Icons.account_circle_rounded),
@@ -1764,20 +2080,27 @@ class _HomeHubPageState extends State<HomeHubPage> {
           const SizedBox(height: 8),
           Align(
             alignment: Alignment.centerLeft,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.graphic_eq, color: Colors.black87, size: 18),
-                    SizedBox(width: 8),
-                    Text('Recorder', style: TextStyle(color: Colors.black, fontWeight: FontWeight.w700)),
-                  ],
+            child: InkWell(
+              borderRadius: BorderRadius.circular(999),
+              onTap: () {
+                widget.onNavigateTab(3);
+                _showHomeSnack('Sleep Recorder opened in Insights.');
+              },
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.graphic_eq, color: Colors.black87, size: 18),
+                      SizedBox(width: 8),
+                      Text('Recorder', style: TextStyle(color: Colors.black, fontWeight: FontWeight.w700)),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -1791,11 +2114,30 @@ class _HomeHubPageState extends State<HomeHubPage> {
               physics: const BouncingScrollPhysics(),
               scrollDirection: Axis.horizontal,
               children: [
-                _mixBubble(icon: Icons.add),
+                _mixBubble(
+                  icon: Icons.add,
+                  onTap: () async {
+                    await state.saveCurrentMixPreset();
+                    if (!mounted) {
+                      return;
+                    }
+                    _showHomeSnack('Current mixer levels saved as preset.');
+                  },
+                ),
                 const SizedBox(width: 10),
                 _mixPill(
                   title: state.mixerPresets.isEmpty ? 'Your First Mix' : state.mixerPresets.first.name,
                   isPlaying: state.isMixerPlaying || state.isPlaying,
+                  onTap: () async {
+                    if (state.mixerPresets.isNotEmpty) {
+                      await state.applyMixPreset(state.mixerPresets.first);
+                    }
+                    await state.toggleMixerPlayback();
+                    if (!mounted) {
+                      return;
+                    }
+                    _showHomeSnack(state.isMixerPlaying ? 'Mixer started.' : 'Mixer stopped.');
+                  },
                 ),
               ],
             ),
@@ -1839,6 +2181,11 @@ class _HomeHubPageState extends State<HomeHubPage> {
               ),
             ),
           ),
+          if (state.adEnabled('home', 'feed_banner'))
+            const Padding(
+              padding: EdgeInsets.only(top: 12),
+              child: AdBannerSlot(),
+            ),
           const SizedBox(height: 20),
           _sectionHeader(featured?.title ?? 'Featured content'),
           const SizedBox(height: 10),
@@ -1903,19 +2250,23 @@ class _HomeHubPageState extends State<HomeHubPage> {
             itemCount: (explore?.items.length ?? 0).clamp(0, 6),
             itemBuilder: (_, i) {
               final item = explore!.items[i];
-              return DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.04),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(item.emoji ?? '✨', style: const TextStyle(fontSize: 20)),
-                    const SizedBox(height: 6),
-                    Text(item.title, style: const TextStyle(fontWeight: FontWeight.w700)),
-                  ],
+              return InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () => _handleExploreTap(item),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.04),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(item.emoji ?? '✨', style: const TextStyle(fontSize: 20)),
+                      const SizedBox(height: 6),
+                      Text(item.title, style: const TextStyle(fontWeight: FontWeight.w700)),
+                    ],
+                  ),
                 ),
               );
             },
@@ -1929,11 +2280,18 @@ class _HomeHubPageState extends State<HomeHubPage> {
               description: therapyPromo.items.first.subtitle ?? '',
               cta: therapyPromo.items.first.ctaLabel ?? 'Learn more',
               accent: const Color(0xFF2BD8C7),
+              onPressed: widget.onOpenProfile,
             ),
           ],
           if (sleepRecorder != null && sleepRecorder.items.isNotEmpty) ...[
             const SizedBox(height: 18),
-            _sleepRecorderCard(sleepRecorder),
+            _sleepRecorderCard(
+              sleepRecorder,
+              onPressed: () {
+                widget.onNavigateTab(3);
+                _showHomeSnack('Track My Sleep opened in Insights.');
+              },
+            ),
           ],
           if (coloredNoises != null) ...[
             const SizedBox(height: 20),
@@ -1941,7 +2299,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
               children: [
                 Expanded(child: _sectionHeader(coloredNoises.title ?? 'Colored Noises')),
                 TextButton(
-                  onPressed: () {},
+                  onPressed: () => widget.onNavigateTab(1),
                   child: const Text('See all'),
                 ),
               ],
@@ -1956,7 +2314,8 @@ class _HomeHubPageState extends State<HomeHubPage> {
               runSpacing: 8,
               children: coloredNoises.items
                   .map(
-                    (item) => Chip(
+                    (item) => ActionChip(
+                      onPressed: () => _playBestMatchTrack(item.title),
                       label: Text(item.title),
                       avatar: const Icon(Icons.graphic_eq_rounded, size: 16),
                       backgroundColor: Colors.white.withValues(alpha: 0.06),
@@ -2043,7 +2402,13 @@ class _HomeHubPageState extends State<HomeHubPage> {
           ],
           if (discover != null && discover.items.isNotEmpty) ...[
             const SizedBox(height: 18),
-            _discoverBanner(discover.items.first),
+            _discoverBanner(
+              discover.items.first,
+              onTap: () {
+                widget.onNavigateTab(1);
+                _showHomeSnack('Explore more sounds in Sounds.');
+              },
+            ),
           ],
           if (trySomethingElse != null) _horizontalSection(trySomethingElse),
           if (curatedPlaylists != null) _horizontalSection(curatedPlaylists),
@@ -2121,6 +2486,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
     required String description,
     required String cta,
     required Color accent,
+    required VoidCallback onPressed,
   }) {
     return Container(
       width: double.infinity,
@@ -2139,7 +2505,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
           const SizedBox(height: 14),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.black),
-            onPressed: () {},
+            onPressed: onPressed,
             child: Text(cta),
           ),
         ],
@@ -2147,7 +2513,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
     );
   }
 
-  Widget _sleepRecorderCard(HomeSectionContent section) {
+  Widget _sleepRecorderCard(HomeSectionContent section, {required VoidCallback onPressed}) {
     final card = section.items.first;
     return Container(
       padding: const EdgeInsets.all(14),
@@ -2170,7 +2536,7 @@ class _HomeHubPageState extends State<HomeHubPage> {
               ),
               FilledButton(
                 style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
-                onPressed: () {},
+                onPressed: onPressed,
                 child: Text(card.ctaLabel ?? 'Start Recorder'),
               ),
             ],
@@ -2180,20 +2546,24 @@ class _HomeHubPageState extends State<HomeHubPage> {
     );
   }
 
-  Widget _discoverBanner(HomeItemContent item) {
-    return Container(
-      width: double.infinity,
-      height: 132,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
-        gradient: const LinearGradient(colors: [Color(0xFF3E2D20), Color(0xFF201410)]),
-      ),
-      child: Center(
-        child: Text(
-          item.title.toUpperCase(),
-          style: const TextStyle(
-            letterSpacing: 3.4,
-            fontWeight: FontWeight.w700,
+  Widget _discoverBanner(HomeItemContent item, {required VoidCallback onTap}) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        height: 132,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          gradient: const LinearGradient(colors: [Color(0xFF3E2D20), Color(0xFF201410)]),
+        ),
+        child: Center(
+          child: Text(
+            item.title.toUpperCase(),
+            style: const TextStyle(
+              letterSpacing: 3.4,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ),
       ),
@@ -2279,34 +2649,177 @@ class _HomeHubPageState extends State<HomeHubPage> {
     unawaited(widget.state.playTrack(selected));
   }
 
-  Widget _mixBubble({required IconData icon}) {
-    return Container(
-      width: 84,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: Colors.white.withValues(alpha: 0.04),
-        border: Border.all(color: Colors.white12),
+  Widget _mixBubble({required IconData icon, required VoidCallback onTap}) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(999),
+      onTap: onTap,
+      child: Container(
+        width: 84,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.white.withValues(alpha: 0.04),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Icon(icon, size: 30),
       ),
-      child: Icon(icon, size: 30),
     );
   }
 
-  Widget _mixPill({required String title, required bool isPlaying}) {
-    return Container(
-      width: 280,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: Colors.white54),
-      ),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: Colors.white.withValues(alpha: 0.08),
-          child: const Icon(Icons.tune_rounded),
+  Widget _mixPill({
+    required String title,
+    required bool isPlaying,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(999),
+      onTap: onTap,
+      child: Container(
+        width: 280,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: Colors.white54),
         ),
-        title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-        trailing: Icon(isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
+        child: ListTile(
+          leading: CircleAvatar(
+            backgroundColor: Colors.white.withValues(alpha: 0.08),
+            child: const Icon(Icons.tune_rounded),
+          ),
+          title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+          trailing: Icon(isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
+        ),
       ),
     );
+  }
+
+  Future<void> _openTrackSearch() async {
+    var tracks = widget.state.tracks;
+    try {
+      final remote = await widget.state._api.searchTracks('');
+      if (remote.isNotEmpty) {
+        tracks = remote;
+      }
+    } catch (_) {
+      // Keep local fallback tracks.
+    }
+    if (!mounted) {
+      return;
+    }
+    await showSearch<SleepTrack?>(
+      context: context,
+      delegate: _TrackSearchDelegate(tracks: tracks),
+    ).then((selected) {
+      if (selected != null) {
+        unawaited(widget.state.playTrack(selected));
+      }
+    });
+  }
+
+  void _handleExploreTap(HomeItemContent item) {
+    final action = '${item.meta['action'] ?? ''}'.toLowerCase();
+    final targetTab = _nullableInt(item.meta['target_tab']);
+    if (action == 'navigate_tab' && targetTab != null) {
+      widget.onNavigateTab(targetTab.clamp(0, 4));
+      return;
+    }
+    final deepLink = item.meta['deep_link']?.toString();
+    if (action == 'play_track' && deepLink != null && deepLink.isNotEmpty) {
+      _playBestMatchTrack(deepLink);
+      return;
+    }
+
+    final key = item.title.toLowerCase();
+    if (key.contains('favorite')) {
+      widget.onNavigateTab(4);
+      return;
+    }
+    if (key.contains('insight')) {
+      widget.onNavigateTab(3);
+      return;
+    }
+    if (key.contains('routine')) {
+      widget.onNavigateTab(2);
+      return;
+    }
+    if (key.contains('sound') || key.contains('mix') || key.contains('music') || key.contains('meditation') || key.contains('sleeptale')) {
+      widget.onNavigateTab(1);
+      return;
+    }
+    _playBestMatchTrack(item.title);
+  }
+
+  void _showHomeSnack(String text) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+}
+
+class _TrackSearchDelegate extends SearchDelegate<SleepTrack?> {
+  _TrackSearchDelegate({required this.tracks});
+
+  final List<SleepTrack> tracks;
+
+  @override
+  String get searchFieldLabel => 'Search sounds, mixes, music...';
+
+  @override
+  List<Widget>? buildActions(BuildContext context) {
+    return [
+      IconButton(
+        onPressed: () => query = '',
+        icon: const Icon(Icons.close_rounded),
+      ),
+    ];
+  }
+
+  @override
+  Widget? buildLeading(BuildContext context) {
+    return IconButton(
+      onPressed: () => close(context, null),
+      icon: const Icon(Icons.arrow_back_ios_new_rounded),
+    );
+  }
+
+  @override
+  Widget buildResults(BuildContext context) {
+    final results = _filteredTracks(query);
+    if (results.isEmpty) {
+      return const Center(child: Text('No matching track found.'));
+    }
+    return _resultList(context, results);
+  }
+
+  @override
+  Widget buildSuggestions(BuildContext context) {
+    final suggestions = query.trim().isEmpty ? tracks.take(10).toList() : _filteredTracks(query);
+    return _resultList(context, suggestions);
+  }
+
+  Widget _resultList(BuildContext context, List<SleepTrack> items) {
+    return ListView.separated(
+      itemCount: items.length,
+      separatorBuilder: (_, __) => const Divider(height: 1),
+      itemBuilder: (_, idx) {
+        final track = items[idx];
+        return ListTile(
+          title: Text(track.title),
+          subtitle: Text('${track.category} • ${track.talking ? 'Talking' : 'No talking'}'),
+          onTap: () => close(context, track),
+        );
+      },
+    );
+  }
+
+  List<SleepTrack> _filteredTracks(String q) {
+    final lower = q.trim().toLowerCase();
+    if (lower.isEmpty) {
+      return tracks;
+    }
+    return tracks.where((track) {
+      return track.title.toLowerCase().contains(lower) ||
+          track.category.toLowerCase().contains(lower);
+    }).toList();
   }
 }
 
@@ -2332,7 +2845,23 @@ class _SavedPageState extends State<SavedPage> {
     final findLove = state.sectionByKey('saved_find_love');
     final suggestions = state.sectionByKey('saved_suggestions');
     final activeSection = switch (_tabIndex) {
-      0 => favorites,
+      0 => state.isAuthenticated && state.savedCloudItems.isNotEmpty
+          ? HomeSectionContent(
+              sectionKey: 'saved_cloud_favorites',
+              title: 'Favorites',
+              subtitle: null,
+              sectionType: 'horizontal',
+              items: state.savedCloudItems
+                  .map(
+                    (item) => HomeItemContent(
+                      title: item.title,
+                      subtitle: item.subtitle,
+                      meta: item.meta,
+                    ),
+                  )
+                  .toList(),
+            )
+          : favorites,
       1 => recentlyPlayed,
       _ => playlists,
     };
@@ -2767,7 +3296,7 @@ class ProfilePage extends StatelessWidget {
             ],
             if (accountCard != null && accountCard.items.isNotEmpty) ...[
               const SizedBox(height: 10),
-              _accountPromptCard(accountCard.items.first),
+              _accountPromptCard(context, accountCard.items.first),
             ],
             if (promo != null && promo.items.isNotEmpty) ...[
               const SizedBox(height: 14),
@@ -2783,6 +3312,11 @@ class ProfilePage extends StatelessWidget {
               _betterHelpPromoCard(promo.items.first),
             ],
             if (resources != null && resources.items.isNotEmpty) ...[
+              if (state.adEnabled('profile', 'mid_banner'))
+                const Padding(
+                  padding: EdgeInsets.only(top: 12),
+                  child: AdBannerSlot(),
+                ),
               const SizedBox(height: 16),
               Text(
                 resources.title ?? 'BetterSleep Resources',
@@ -2832,7 +3366,40 @@ class ProfilePage extends StatelessWidget {
     );
   }
 
-  Widget _accountPromptCard(HomeItemContent item) {
+  Widget _accountPromptCard(BuildContext context, HomeItemContent item) {
+    if (state.isAuthenticated && state.currentUser != null) {
+      return Container(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(_UiBaseline.profileCardRadius),
+          color: Colors.white.withValues(alpha: 0.04),
+          border: Border.all(color: Colors.white10),
+        ),
+        child: Column(
+          children: [
+            Text(
+              'Signed in as ${state.currentUser!.name}',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              state.currentUser!.email,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonal(
+              onPressed: () async {
+                await state.logoutAccount();
+              },
+              child: const Text('Logout'),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
       decoration: BoxDecoration(
@@ -2866,7 +3433,7 @@ class ProfilePage extends StatelessWidget {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                     minimumSize: const Size(0, 52),
                   ),
-                  onPressed: () {},
+                  onPressed: () => _openAuthSheet(context, isRegister: false),
                   child: const Text('Log in', style: TextStyle(fontWeight: FontWeight.w700)),
                 ),
               ),
@@ -2879,7 +3446,7 @@ class ProfilePage extends StatelessWidget {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                     minimumSize: const Size(0, 52),
                   ),
-                  onPressed: () {},
+                  onPressed: () => _openAuthSheet(context, isRegister: true),
                   child: const Text('Register', style: TextStyle(fontWeight: FontWeight.w800)),
                 ),
               ),
@@ -2887,6 +3454,82 @@ class ProfilePage extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  Future<void> _openAuthSheet(BuildContext context, {required bool isRegister}) async {
+    final emailCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
+    final nameCtrl = TextEditingController();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF15182A),
+      builder: (context) {
+        return Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).viewInsets.bottom + 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(isRegister ? 'Create account' : 'Log in', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 12),
+              if (isRegister)
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(labelText: 'Name'),
+                ),
+              if (isRegister) const SizedBox(height: 10),
+              TextField(
+                controller: emailCtrl,
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(labelText: 'Email'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: passCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Password'),
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () async {
+                    try {
+                      if (isRegister) {
+                        await state.registerWithEmail(
+                          name: nameCtrl.text.trim(),
+                          email: emailCtrl.text.trim(),
+                          password: passCtrl.text.trim(),
+                        );
+                      } else {
+                        await state.loginWithEmail(
+                          email: emailCtrl.text.trim(),
+                          password: passCtrl.text.trim(),
+                        );
+                      }
+                      if (!context.mounted) {
+                        return;
+                      }
+                      Navigator.of(context).pop();
+                    } catch (_) {
+                      if (!context.mounted) {
+                        return;
+                      }
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(isRegister ? 'Registration failed.' : 'Login failed.')),
+                      );
+                    }
+                  },
+                  child: Text(isRegister ? 'Create account' : 'Log in'),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -3051,7 +3694,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         ListView(
           physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
-          padding: const EdgeInsets.fromLTRB(_UiBaseline.pageHorizontal, 10, _UiBaseline.pageHorizontal, 190),
+          padding: const EdgeInsets.fromLTRB(_UiBaseline.pageHorizontal, 8, _UiBaseline.pageHorizontal, 190),
           children: [
             IconButton(
               onPressed: widget.onBack,
@@ -3059,26 +3702,16 @@ class _SettingsPageState extends State<SettingsPage> {
               padding: EdgeInsets.zero,
               icon: const Icon(Icons.arrow_back_ios_new_rounded),
             ),
-            const SizedBox(height: 2),
-            const Text(
-              'Settings',
-              style: TextStyle(
-                fontSize: _UiBaseline.profileTitleSize,
-                fontWeight: FontWeight.w800,
-                letterSpacing: -0.4,
-              ),
-            ),
+            _settingsSectionHeader('Settings', withLine: true),
             const SizedBox(height: 8),
             if (main != null && main.items.isNotEmpty) _settingsListCard(main.items),
-            const SizedBox(height: 14),
-            Text(
-              more?.title ?? 'More',
-              style: const TextStyle(
-                fontSize: _UiBaseline.profileTitleSize,
-                fontWeight: FontWeight.w800,
-                letterSpacing: -0.4,
+            if (widget.state.adEnabled('settings', 'list_banner'))
+              const Padding(
+                padding: EdgeInsets.only(top: 12),
+                child: AdBannerSlot(),
               ),
-            ),
+            const SizedBox(height: 14),
+            _settingsSectionHeader(more?.title ?? 'More'),
             const SizedBox(height: 8),
             if (more != null && more.items.isNotEmpty) _settingsListCard(more.items),
           ],
@@ -3090,7 +3723,7 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _settingsListCard(List<HomeItemContent> items) {
     return Container(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(_UiBaseline.profileListRadius),
+        borderRadius: BorderRadius.circular(_UiBaseline.settingsCardRadius),
         color: Colors.white.withValues(alpha: 0.04),
         border: Border.all(color: Colors.white10),
       ),
@@ -3111,7 +3744,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final current = _toggles[item.title] ?? (item.meta['enabled'] == true);
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: _UiBaseline.settingsRowVertical),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
@@ -3139,7 +3772,7 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(width: 12),
           if (isToggle)
             Transform.scale(
-              scale: 0.9,
+              scale: _UiBaseline.settingsToggleScale,
               child: Switch(
                 value: current,
                 onChanged: (value) => setState(() => _toggles[item.title] = value),
@@ -3153,6 +3786,30 @@ class _SettingsPageState extends State<SettingsPage> {
             const Icon(Icons.chevron_right_rounded, color: Colors.white70),
         ],
       ),
+    );
+  }
+
+  Widget _settingsSectionHeader(String text, {bool withLine = false}) {
+    return Row(
+      children: [
+        Text(
+          text,
+          style: const TextStyle(
+            fontSize: _UiBaseline.settingsTitleSize,
+            fontWeight: FontWeight.w800,
+            letterSpacing: -0.4,
+          ),
+        ),
+        if (withLine) ...[
+          const SizedBox(width: 10),
+          Expanded(
+            child: Container(
+              height: 1,
+              color: Colors.white.withValues(alpha: 0.08),
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -4864,6 +5521,96 @@ class MixPreset {
   }
 }
 
+class AppUserProfile {
+  const AppUserProfile({
+    required this.id,
+    required this.name,
+    required this.email,
+  });
+
+  final int id;
+  final String name;
+  final String email;
+
+  factory AppUserProfile.fromJson(Map<String, dynamic> json) {
+    return AppUserProfile(
+      id: _toInt(json['id']),
+      name: '${json['name'] ?? ''}',
+      email: '${json['email'] ?? ''}',
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'name': name,
+      'email': email,
+    };
+  }
+}
+
+class AuthResult {
+  const AuthResult({
+    required this.token,
+    required this.user,
+  });
+
+  final String token;
+  final AppUserProfile user;
+}
+
+class SavedContentItem {
+  const SavedContentItem({
+    required this.id,
+    required this.itemType,
+    required this.itemRef,
+    required this.title,
+    this.subtitle,
+    this.meta = const <String, dynamic>{},
+  });
+
+  final int id;
+  final String itemType;
+  final String itemRef;
+  final String title;
+  final String? subtitle;
+  final Map<String, dynamic> meta;
+
+  factory SavedContentItem.fromJson(Map<String, dynamic> json) {
+    final meta = json['meta'] is Map<String, dynamic>
+        ? json['meta'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    return SavedContentItem(
+      id: _toInt(json['id']),
+      itemType: '${json['item_type'] ?? 'track'}',
+      itemRef: '${json['item_ref'] ?? ''}',
+      title: '${json['title'] ?? ''}',
+      subtitle: json['subtitle']?.toString(),
+      meta: meta,
+    );
+  }
+}
+
+class AdPlacementConfig {
+  const AdPlacementConfig({
+    required this.screen,
+    required this.slotKey,
+    required this.enabled,
+  });
+
+  final String screen;
+  final String slotKey;
+  final bool enabled;
+
+  factory AdPlacementConfig.fromJson(Map<String, dynamic> json) {
+    return AdPlacementConfig(
+      screen: '${json['screen'] ?? ''}',
+      slotKey: '${json['slot_key'] ?? ''}',
+      enabled: json['enabled'] == true || json['enabled'] == 1,
+    );
+  }
+}
+
 class HomeSectionContent {
   const HomeSectionContent({
     required this.sectionKey,
@@ -5689,6 +6436,12 @@ class SleepWellApi {
     return 'sleepwell-${Platform.operatingSystem.toLowerCase()}-$host';
   }
 
+  String? _authToken;
+
+  void setAuthToken(String? value) {
+    _authToken = value;
+  }
+
   Future<List<SleepTrack>> fetchCatalog() async {
     final json = await _request('GET', '/catalog');
     final tracksRaw = (json['tracks'] as List<dynamic>? ?? <dynamic>[]);
@@ -5850,6 +6603,124 @@ class SleepWellApi {
     );
   }
 
+  Future<AuthResult> register({
+    required String name,
+    required String email,
+    required String password,
+    required String deviceId,
+  }) async {
+    final json = await _request(
+      'POST',
+      '/auth/register',
+      body: {
+        'name': name,
+        'email': email,
+        'password': password,
+        'device_id': deviceId,
+      },
+    );
+    final token = '${json['token'] ?? ''}';
+    final user = AppUserProfile.fromJson(
+      (json['user'] is Map<String, dynamic>) ? json['user'] as Map<String, dynamic> : <String, dynamic>{},
+    );
+    return AuthResult(token: token, user: user);
+  }
+
+  Future<AuthResult> login({
+    required String email,
+    required String password,
+    required String deviceId,
+  }) async {
+    final json = await _request(
+      'POST',
+      '/auth/login',
+      body: {
+        'email': email,
+        'password': password,
+        'device_id': deviceId,
+      },
+    );
+    final token = '${json['token'] ?? ''}';
+    final user = AppUserProfile.fromJson(
+      (json['user'] is Map<String, dynamic>) ? json['user'] as Map<String, dynamic> : <String, dynamic>{},
+    );
+    return AuthResult(token: token, user: user);
+  }
+
+  Future<void> logout() async {
+    await _request('POST', '/auth/logout');
+  }
+
+  Future<AppUserProfile> fetchMe() async {
+    final json = await _request('GET', '/auth/me');
+    final userRaw = (json['user'] is Map<String, dynamic>)
+        ? json['user'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    return AppUserProfile.fromJson(userRaw);
+  }
+
+  Future<SleepInsights> fetchInsightsForUser() async {
+    final json = await _request('GET', '/insights');
+    return SleepInsights.fromJson(json);
+  }
+
+  Future<List<MixPreset>> fetchMixPresetsForUser() async {
+    final json = await _request('GET', '/mix-presets');
+    final presetsRaw = (json['presets'] as List<dynamic>? ?? <dynamic>[]);
+    return presetsRaw
+        .whereType<Map<String, dynamic>>()
+        .map(MixPreset.fromJson)
+        .toList();
+  }
+
+  Future<List<SavedContentItem>> fetchSavedItems({String? type}) async {
+    final query = (type == null || type.isEmpty) ? '' : '?type=$type';
+    final json = await _request('GET', '/saved-items$query');
+    final raw = (json['items'] as List<dynamic>? ?? <dynamic>[]);
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(SavedContentItem.fromJson)
+        .toList();
+  }
+
+  Future<void> upsertSavedItem({
+    required String itemType,
+    required String itemRef,
+    required String title,
+    String? subtitle,
+    Map<String, dynamic> meta = const <String, dynamic>{},
+  }) async {
+    await _request(
+      'POST',
+      '/saved-items',
+      body: {
+        'item_type': itemType,
+        'item_ref': itemRef,
+        'title': title,
+        'subtitle': subtitle,
+        'meta': meta,
+      },
+    );
+  }
+
+  Future<List<SleepTrack>> searchTracks(String query) async {
+    final json = await _request('GET', '/search?q=${Uri.encodeQueryComponent(query)}');
+    final raw = (json['results'] as List<dynamic>? ?? <dynamic>[]);
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(SleepTrack.fromJson)
+        .toList();
+  }
+
+  Future<List<AdPlacementConfig>> fetchAdPlacements() async {
+    final json = await _request('GET', '/ad-placements');
+    final raw = (json['placements'] as List<dynamic>? ?? <dynamic>[]);
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(AdPlacementConfig.fromJson)
+        .toList();
+  }
+
   Future<Map<String, dynamic>> _request(
     String method,
     String path, {
@@ -5862,6 +6733,9 @@ class SleepWellApi {
         );
     request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
     request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    if (_authToken != null && _authToken!.isNotEmpty) {
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_authToken');
+    }
     if (body != null) {
       request.write(jsonEncode(body));
     }
