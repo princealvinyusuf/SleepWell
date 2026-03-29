@@ -1457,6 +1457,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int index = 0;
   bool showProfile = false;
+  bool showSettings = false;
 
   @override
   Widget build(BuildContext context) {
@@ -1505,10 +1506,16 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 Expanded(
                   child: showProfile
-                      ? ProfilePage(
-                          state: widget.state,
-                          onBack: () => setState(() => showProfile = false),
-                        )
+                      ? (showSettings
+                            ? SettingsPage(
+                                state: widget.state,
+                                onBack: () => setState(() => showSettings = false),
+                              )
+                            : ProfilePage(
+                                state: widget.state,
+                                onBack: () => setState(() => showProfile = false),
+                                onOpenSettings: () => setState(() => showSettings = true),
+                              ))
                       : pages[index],
                 ),
               ],
@@ -1658,6 +1665,7 @@ class _HomeScreenState extends State<HomeScreen> {
         onTap: () => setState(() {
           index = i;
           showProfile = false;
+          showSettings = false;
         }),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 5),
@@ -2659,10 +2667,12 @@ class ProfilePage extends StatelessWidget {
     super.key,
     required this.state,
     required this.onBack,
+    required this.onOpenSettings,
   });
 
   final SleepWellState state;
   final VoidCallback onBack;
+  final VoidCallback onOpenSettings;
 
   @override
   Widget build(BuildContext context) {
@@ -2708,7 +2718,7 @@ class ProfilePage extends StatelessWidget {
                   ),
                   child: IconButton(
                     padding: EdgeInsets.zero,
-                    onPressed: () {},
+                    onPressed: onOpenSettings,
                     icon: const Icon(Icons.settings_rounded, size: 19),
                   ),
                 ),
@@ -3000,6 +3010,149 @@ class ProfilePage extends StatelessWidget {
         ),
         if (showDivider) const Divider(height: 1, color: Colors.white10),
       ],
+    );
+  }
+}
+
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({
+    super.key,
+    required this.state,
+    required this.onBack,
+  });
+
+  final SleepWellState state;
+  final VoidCallback onBack;
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  final Map<String, bool> _toggles = <String, bool>{};
+
+  @override
+  Widget build(BuildContext context) {
+    final main = widget.state.sectionByKey('profile_settings_main');
+    final more = widget.state.sectionByKey('profile_settings_more');
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0xFF1F1934), Color(0xFF0E1020), Color(0xFF090C18)],
+              ),
+            ),
+          ),
+        ),
+        ListView(
+          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+          padding: const EdgeInsets.fromLTRB(_UiBaseline.pageHorizontal, 10, _UiBaseline.pageHorizontal, 190),
+          children: [
+            IconButton(
+              onPressed: widget.onBack,
+              alignment: Alignment.centerLeft,
+              padding: EdgeInsets.zero,
+              icon: const Icon(Icons.arrow_back_ios_new_rounded),
+            ),
+            const SizedBox(height: 2),
+            const Text(
+              'Settings',
+              style: TextStyle(
+                fontSize: _UiBaseline.profileTitleSize,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.4,
+              ),
+            ),
+            const SizedBox(height: 8),
+            if (main != null && main.items.isNotEmpty) _settingsListCard(main.items),
+            const SizedBox(height: 14),
+            Text(
+              more?.title ?? 'More',
+              style: const TextStyle(
+                fontSize: _UiBaseline.profileTitleSize,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.4,
+              ),
+            ),
+            const SizedBox(height: 8),
+            if (more != null && more.items.isNotEmpty) _settingsListCard(more.items),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _settingsListCard(List<HomeItemContent> items) {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(_UiBaseline.profileListRadius),
+        color: Colors.white.withValues(alpha: 0.04),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        children: [
+          for (var i = 0; i < items.length; i++) ...[
+            _settingsRow(items[i]),
+            if (i != items.length - 1) const Divider(height: 1, color: Colors.white10),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _settingsRow(HomeItemContent item) {
+    final action = (item.meta['action']?.toString() ?? '').toLowerCase();
+    final isToggle = action == 'toggle';
+    final current = _toggles[item.title] ?? (item.meta['enabled'] == true);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item.title,
+                  style: const TextStyle(
+                    fontSize: _UiBaseline.profileRowTitleSize,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                if ((item.subtitle ?? '').isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    item.subtitle!,
+                    style: const TextStyle(color: Colors.white70, height: 1.15),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          if (isToggle)
+            Transform.scale(
+              scale: 0.9,
+              child: Switch(
+                value: current,
+                onChanged: (value) => setState(() => _toggles[item.title] = value),
+                activeTrackColor: Colors.white,
+                inactiveTrackColor: Colors.white24,
+                activeColor: Colors.black,
+                inactiveThumbColor: Colors.white,
+              ),
+            )
+          else
+            const Icon(Icons.chevron_right_rounded, color: Colors.white70),
+        ],
+      ),
     );
   }
 }
@@ -5493,6 +5646,34 @@ const List<HomeSectionContent> _fallbackHomeSections = <HomeSectionContent>[
         subtitle: 'Yearly',
         meta: <String, dynamic>{'action': 'pill', 'badge': 'MANAGE'},
       ),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'profile_settings_main',
+    title: 'Settings',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Change Language', meta: <String, dynamic>{'action': 'arrow'}),
+      HomeItemContent(title: 'My Data', meta: <String, dynamic>{'action': 'arrow'}),
+      HomeItemContent(
+        title: 'Play with other apps',
+        subtitle: 'Allow playing music from other apps alongside BetterSleep.',
+        meta: <String, dynamic>{'action': 'toggle', 'enabled': true},
+      ),
+      HomeItemContent(title: 'Clear Downloads', meta: <String, dynamic>{'action': 'arrow'}),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'profile_settings_more',
+    title: 'More',
+    subtitle: null,
+    sectionType: 'horizontal',
+    items: <HomeItemContent>[
+      HomeItemContent(title: 'Help & Support', meta: <String, dynamic>{'action': 'arrow'}),
+      HomeItemContent(title: 'Rate Our App', meta: <String, dynamic>{'action': 'arrow'}),
+      HomeItemContent(title: 'Terms of Service', meta: <String, dynamic>{'action': 'arrow'}),
+      HomeItemContent(title: 'Privacy Policy', meta: <String, dynamic>{'action': 'arrow'}),
     ],
   ),
 ];
