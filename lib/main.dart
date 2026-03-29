@@ -181,6 +181,7 @@ class SleepWellState extends ChangeNotifier {
   StreamSubscription<Duration>? _positionSubscription;
   StreamSubscription<PlayerState>? _playerStateSubscription;
   Timer? _sleepTimer;
+  Timer? _sleepTimerTicker;
   Timer? _bedtimeTicker;
   final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
 
@@ -237,6 +238,7 @@ class SleepWellState extends ChangeNotifier {
   String appLanguage = 'en';
   DateTime? _lastBedtimeTriggerAt;
   int sleepTimerMinutes = 30;
+  DateTime? _sleepTimerEndsAt;
   Duration currentPosition = Duration.zero;
   Duration currentDuration = Duration.zero;
   double mainPlayerVolume = 1.0;
@@ -1666,6 +1668,17 @@ class SleepWellState extends ChangeNotifier {
 
   Future<void> _scheduleSleepTimer() async {
     await _cancelSleepTimer();
+    _sleepTimerEndsAt = DateTime.now().add(Duration(minutes: sleepTimerMinutes));
+    _sleepTimerTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_sleepTimerEndsAt == null) {
+        return;
+      }
+      if (DateTime.now().isAfter(_sleepTimerEndsAt!)) {
+        return;
+      }
+      notifyListeners();
+    });
+    notifyListeners();
     _sleepTimer = Timer(Duration(minutes: sleepTimerMinutes), () async {
       await _logEvent('timer_completed');
       await stopPlayback();
@@ -1675,6 +1688,26 @@ class SleepWellState extends ChangeNotifier {
   Future<void> _cancelSleepTimer() async {
     _sleepTimer?.cancel();
     _sleepTimer = null;
+    _sleepTimerTicker?.cancel();
+    _sleepTimerTicker = null;
+    _sleepTimerEndsAt = null;
+    notifyListeners();
+  }
+
+  bool get hasActiveSleepTimer {
+    return remainingSleepTimer > Duration.zero;
+  }
+
+  Duration get remainingSleepTimer {
+    final endsAt = _sleepTimerEndsAt;
+    if (endsAt == null) {
+      return Duration.zero;
+    }
+    final remaining = endsAt.difference(DateTime.now());
+    if (remaining.isNegative) {
+      return Duration.zero;
+    }
+    return remaining;
   }
 
   void _startBedtimeTicker() {
@@ -1756,6 +1789,7 @@ class SleepWellState extends ChangeNotifier {
   @override
   void dispose() {
     _sleepTimer?.cancel();
+    _sleepTimerTicker?.cancel();
     _bedtimeTicker?.cancel();
     _positionSubscription?.cancel();
     _playerStateSubscription?.cancel();
@@ -6078,8 +6112,11 @@ class _LayeredPlayerPageState extends State<LayeredPlayerPage> {
                         children: [
                           _footerAction(
                             icon: Icons.timer_outlined,
-                            label: 'Set Timer',
+                            label: widget.state.hasActiveSleepTimer
+                                ? _formatTimerCountdown(widget.state.remainingSleepTimer)
+                                : 'Set Timer',
                             onTap: _setTimer,
+                            active: widget.state.hasActiveSleepTimer,
                           ),
                           _footerAction(
                             icon: widget.state.isPlaying ? Icons.pause : Icons.play_arrow,
@@ -6197,6 +6234,7 @@ class _LayeredPlayerPageState extends State<LayeredPlayerPage> {
     required String label,
     required VoidCallback onTap,
     bool emphasized = false,
+    bool active = false,
   }) {
     return InkWell(
       borderRadius: BorderRadius.circular(999),
@@ -6205,13 +6243,19 @@ class _LayeredPlayerPageState extends State<LayeredPlayerPage> {
         children: [
           CircleAvatar(
             radius: emphasized ? 32 : 22,
-            backgroundColor: Colors.white.withValues(alpha: emphasized ? 0.95 : 0.2),
-            child: Icon(icon, color: emphasized ? Colors.black : Colors.white),
+            backgroundColor: active
+                ? Colors.white
+                : Colors.white.withValues(alpha: emphasized ? 0.95 : 0.2),
+            child: Icon(
+              icon,
+              color: emphasized || active ? Colors.black : Colors.white,
+            ),
           ),
-          if (label.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
-          ],
+          const SizedBox(height: 6),
+          Text(
+            label,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
         ],
       ),
     );
@@ -7108,8 +7152,11 @@ class NowPlayingPage extends StatelessWidget {
                         children: [
                           _ambientFooterAction(
                             icon: Icons.timer_outlined,
-                            label: 'Set Timer',
+                            label: state.hasActiveSleepTimer
+                                ? _formatTimerCountdown(state.remainingSleepTimer)
+                                : 'Set Timer',
                             onTap: () => _showSleepTimerSheet(context),
+                            active: state.hasActiveSleepTimer,
                           ),
                           _ambientFooterAction(
                             icon: state.isPlaying ? Icons.pause : Icons.play_arrow,
@@ -7305,7 +7352,7 @@ class NowPlayingPage extends StatelessWidget {
               label,
               style: TextStyle(
                 fontWeight: FontWeight.w700,
-                color: active ? const Color(0xFFFFD6E4) : Colors.white,
+                color: Colors.white,
               ),
             ),
           ],
@@ -9397,6 +9444,13 @@ String _formatDuration(Duration duration) {
   if (hours > 0) {
     return '${hours.toString().padLeft(2, '0')}:$minutes:$seconds';
   }
+  return '$minutes:$seconds';
+}
+
+String _formatTimerCountdown(Duration duration) {
+  final totalSeconds = max(0, duration.inSeconds);
+  final minutes = totalSeconds ~/ 60;
+  final seconds = (totalSeconds % 60).toString().padLeft(2, '0');
   return '$minutes:$seconds';
 }
 
