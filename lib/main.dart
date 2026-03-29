@@ -5349,7 +5349,7 @@ class _PlayerPageState extends State<PlayerPage> {
                 crossAxisCount: isSoundsGrid ? 4 : 3,
                 crossAxisSpacing: 10,
                 mainAxisSpacing: 12,
-                childAspectRatio: isSoundsGrid ? 0.72 : 0.78,
+                childAspectRatio: isSoundsGrid ? 0.56 : 0.78,
               ),
               itemCount: items.length,
               itemBuilder: (_, i) {
@@ -5377,12 +5377,13 @@ class _PlayerPageState extends State<PlayerPage> {
                       ),
                       const SizedBox(height: 6),
                       SizedBox(
-                        height: 58,
+                        height: 42,
                         child: Text(
                           item.title,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           textAlign: TextAlign.center,
+                          style: const TextStyle(height: 1.15),
                         ),
                       ),
                     ],
