@@ -2656,6 +2656,7 @@ class ProfilePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final topPromo = state.sectionByKey('profile_top_promo');
     final header = state.sectionByKey('profile_header');
     final chronotype = state.sectionByKey('profile_chronotype');
     final accountCard = state.sectionByKey('profile_auth_card');
@@ -2682,30 +2683,50 @@ class ProfilePage extends StatelessWidget {
           children: [
             Row(
               children: [
-                IconButton(onPressed: onBack, icon: const Icon(Icons.arrow_back_ios_new_rounded)),
+                IconButton(
+                  onPressed: onBack,
+                  icon: const Icon(Icons.arrow_back_ios_new_rounded),
+                ),
                 const Spacer(),
-                IconButton(onPressed: () {}, icon: const Icon(Icons.settings_rounded)),
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withValues(alpha: 0.03),
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    onPressed: () {},
+                    icon: const Icon(Icons.settings_rounded, size: 19),
+                  ),
+                ),
               ],
             ),
+            if (topPromo != null && topPromo.items.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _betterHelpPromoCard(topPromo.items.first, compact: true),
+            ],
             if (header != null && header.items.isNotEmpty) ...[
-              const SizedBox(height: 4),
+              const SizedBox(height: 10),
               Center(
                 child: Container(
-                  width: 94,
-                  height: 94,
+                  width: 92,
+                  height: 92,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: Colors.white.withValues(alpha: 0.08),
                     border: Border.all(color: Colors.white24),
                   ),
-                  child: const Icon(Icons.nights_stay_rounded, size: 48, color: Color(0xFFFFC992)),
+                  child: const Icon(Icons.nights_stay_rounded, size: 46, color: Color(0xFFFFC992)),
                 ),
               ),
               const SizedBox(height: 8),
               Center(
                 child: Text(
                   header.items.first.title,
-                  style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: -0.35),
                 ),
               ),
             ],
@@ -2728,7 +2749,7 @@ class ProfilePage extends StatelessWidget {
               const SizedBox(height: 14),
               Text(
                 promo.title ?? 'Still waking up tired?',
-                style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800, letterSpacing: -0.6),
+                style: const TextStyle(fontSize: 40, fontWeight: FontWeight.w800, letterSpacing: -0.45),
               ),
               const SizedBox(height: 10),
               _betterHelpPromoCard(promo.items.first),
@@ -2737,7 +2758,7 @@ class ProfilePage extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 resources.title ?? 'BetterSleep Resources',
-                style: const TextStyle(fontSize: 42, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w800, letterSpacing: -0.4),
               ),
               const SizedBox(height: 10),
               _profileListCard(
@@ -2755,7 +2776,7 @@ class ProfilePage extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 account.title ?? 'Account',
-                style: const TextStyle(fontSize: 42, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w800, letterSpacing: -0.4),
               ),
               const SizedBox(height: 10),
               _profileListCard(
@@ -2788,7 +2809,7 @@ class ProfilePage extends StatelessWidget {
           Text(
             item.title,
             textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 46, fontWeight: FontWeight.w800, letterSpacing: -0.55),
+            style: const TextStyle(fontSize: 40, fontWeight: FontWeight.w800, letterSpacing: -0.4),
           ),
           if ((item.subtitle ?? '').isNotEmpty) ...[
             const SizedBox(height: 6),
@@ -2807,7 +2828,7 @@ class ProfilePage extends StatelessWidget {
                     foregroundColor: Colors.white,
                     side: const BorderSide(color: Colors.white24),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-                    minimumSize: const Size(0, 48),
+                    minimumSize: const Size(0, 52),
                   ),
                   onPressed: () {},
                   child: const Text('Log in', style: TextStyle(fontWeight: FontWeight.w700)),
@@ -2820,7 +2841,7 @@ class ProfilePage extends StatelessWidget {
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-                    minimumSize: const Size(0, 48),
+                    minimumSize: const Size(0, 52),
                   ),
                   onPressed: () {},
                   child: const Text('Register', style: TextStyle(fontWeight: FontWeight.w800)),
@@ -2833,9 +2854,9 @@ class ProfilePage extends StatelessWidget {
     );
   }
 
-  Widget _betterHelpPromoCard(HomeItemContent item) {
+  Widget _betterHelpPromoCard(HomeItemContent item, {bool compact = false}) {
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: EdgeInsets.all(compact ? 12 : 14),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(18),
         gradient: const LinearGradient(
@@ -2849,12 +2870,16 @@ class ProfilePage extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text('betterhelp', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           Text(
             item.title,
-            style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w800, letterSpacing: -0.4),
+            style: TextStyle(
+              fontSize: compact ? 24 : 33,
+              fontWeight: FontWeight.w800,
+              letterSpacing: -0.35,
+            ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             decoration: BoxDecoration(
@@ -2862,7 +2887,7 @@ class ProfilePage extends StatelessWidget {
               borderRadius: BorderRadius.circular(999),
             ),
             child: Text(
-              item.ctaLabel ?? 'Take the assessment',
+              item.ctaLabel ?? 'Take the assessment →',
               style: const TextStyle(color: Colors.black, fontWeight: FontWeight.w800),
             ),
           ),
@@ -2896,7 +2921,7 @@ class ProfilePage extends StatelessWidget {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
           child: Row(
             children: [
               if (leadingIcon != null) ...[
@@ -2916,7 +2941,7 @@ class ProfilePage extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(item.title, style: const TextStyle(fontWeight: FontWeight.w800)),
+                    Text(item.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
                     if ((item.subtitle ?? '').isNotEmpty)
                       Text(item.subtitle!, style: const TextStyle(color: Colors.white70)),
                   ],
@@ -5349,6 +5374,19 @@ const List<HomeSectionContent> _fallbackHomeSections = <HomeSectionContent>[
       HomeItemContent(title: 'Calming City Rain', subtitle: 'Mix • 3 items', meta: <String, dynamic>{'action': 'heart'}),
       HomeItemContent(title: 'The Underwater City', subtitle: 'SleepTale • 49 min', meta: <String, dynamic>{'action': 'more'}),
       HomeItemContent(title: '3D Rain Narrative', subtitle: 'Meditation • 30 min', meta: <String, dynamic>{'action': 'more'}),
+    ],
+  ),
+  HomeSectionContent(
+    sectionKey: 'profile_top_promo',
+    title: null,
+    subtitle: null,
+    sectionType: 'promo',
+    items: <HomeItemContent>[
+      HomeItemContent(
+        title: 'You have 50% off your first month of therapy',
+        subtitle: 'Take the assessment',
+        ctaLabel: 'Take the assessment →',
+      ),
     ],
   ),
   HomeSectionContent(
