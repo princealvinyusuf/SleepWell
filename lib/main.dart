@@ -238,6 +238,7 @@ class SleepWellState extends ChangeNotifier {
   List<SleepTrack> tracks = <SleepTrack>[
     const SleepTrack(
       title: 'Moonlight Whispers',
+      subtitle: 'Gentle sleep story',
       category: 'whisper',
       talking: true,
       streamUrl: _fallbackAudioUrl,
@@ -245,6 +246,7 @@ class SleepWellState extends ChangeNotifier {
     ),
     const SleepTrack(
       title: 'Forest Rain Deep Sleep',
+      subtitle: 'Steady rain ambience',
       category: 'rain',
       talking: false,
       streamUrl: _fallbackAudioUrl,
@@ -252,6 +254,7 @@ class SleepWellState extends ChangeNotifier {
     ),
     const SleepTrack(
       title: 'No Talking Brown Noise',
+      subtitle: 'My Favorite Mix',
       category: 'no_talking',
       talking: false,
       streamUrl: _fallbackAudioUrl,
@@ -259,6 +262,7 @@ class SleepWellState extends ChangeNotifier {
     ),
     const SleepTrack(
       title: 'Night Spa Roleplay',
+      subtitle: 'Guided wind-down session',
       category: 'roleplay',
       talking: true,
       streamUrl: _fallbackAudioUrl,
@@ -453,7 +457,7 @@ class SleepWellState extends ChangeNotifier {
           itemType: 'recently_played',
           itemRef: '${track.id ?? track.title}',
           title: track.title,
-          subtitle: '${track.category} • ${track.talking ? 'Talking' : 'No talking'}',
+          subtitle: track.displaySubtitle,
         ),
       );
     }
@@ -645,7 +649,7 @@ class SleepWellState extends ChangeNotifier {
 
   Future<void> toggleFavoriteTrack(SleepTrack track) async {
     final ref = '${track.id ?? track.title}';
-    final subtitle = '${track.category} • ${track.talking ? 'Talking' : 'No talking'}';
+    final subtitle = track.displaySubtitle;
     if (isFavoriteTrack(track)) {
       localFavoriteRefs.remove(ref);
       await _logEvent('favorite_remove');
@@ -691,7 +695,7 @@ class SleepWellState extends ChangeNotifier {
         itemType: 'downloads',
         itemRef: ref,
         title: track.title,
-        subtitle: track.category,
+        subtitle: track.displaySubtitle,
         refreshAfter: false,
       );
       await refreshCloudSavedItems();
@@ -1503,6 +1507,7 @@ class SleepTrack {
   const SleepTrack({
     this.id,
     required this.title,
+    this.subtitle,
     required this.category,
     required this.talking,
     this.streamUrl,
@@ -1511,15 +1516,25 @@ class SleepTrack {
 
   final int? id;
   final String title;
+  final String? subtitle;
   final String category;
   final bool talking;
   final String? streamUrl;
   final int durationSeconds;
 
+  String get displaySubtitle {
+    final value = subtitle?.trim() ?? '';
+    if (value.isNotEmpty) {
+      return value;
+    }
+    return '$category • ${talking ? 'Talking' : 'No talking'}';
+  }
+
   factory SleepTrack.fromJson(Map<String, dynamic> json) {
     return SleepTrack(
       id: json['id'] is int ? json['id'] as int : int.tryParse('${json['id']}'),
       title: '${json['title'] ?? 'Untitled'}',
+      subtitle: json['subtitle']?.toString(),
       category: '${json['category'] ?? 'rain'}',
       talking: json['talking'] == true || json['talking'] == 1,
       streamUrl: json['stream_url']?.toString(),
@@ -2213,9 +2228,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
                   ),
-                  subtitle: const Text(
-                    'My Favorite Mix',
-                    style: TextStyle(color: Colors.white70),
+                  subtitle: Text(
+                    widget.state.selectedTrack!.displaySubtitle,
+                    style: const TextStyle(color: Colors.white70),
                   ),
                   trailing: IconButton(
                     icon: Icon(
@@ -3295,7 +3310,7 @@ class _TrackSearchDelegate extends SearchDelegate<SleepTrack?> {
         final track = items[idx];
         return ListTile(
           title: Text(track.title),
-          subtitle: Text('${track.category} • ${track.talking ? 'Talking' : 'No talking'}'),
+          subtitle: Text(track.displaySubtitle),
           onTap: () => close(context, track),
         );
       },
