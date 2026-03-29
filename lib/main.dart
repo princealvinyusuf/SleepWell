@@ -192,8 +192,10 @@ class SleepWellState extends ChangeNotifier {
   String? authToken;
   AppUserProfile? currentUser;
   final List<SavedContentItem> savedCloudItems = <SavedContentItem>[];
+  final List<SavedContentItem> localMixItems = <SavedContentItem>[];
   final Set<String> localFavoriteRefs = <String>{};
   final Set<String> localDownloadRefs = <String>{};
+  final Set<String> _activeMixKinds = <String>{};
   final List<Map<String, dynamic>> _queuedEvents = <Map<String, dynamic>>[];
   List<AdPlacementConfig> adPlacements = <AdPlacementConfig>[];
   final Map<String, bool> settingsToggles = <String, bool>{};
@@ -444,6 +446,9 @@ class SleepWellState extends ChangeNotifier {
       lastError = 'Running Sleep Now in offline mode.';
     }
 
+    if (selectedTrack != null) {
+      _seedActiveMixKindsForTrack(selectedTrack!);
+    }
     await _startSession(mode: 'sleep_now', entryPoint: entryPoint);
     if (_isWithinBedtimeAdherenceWindow(DateTime.now())) {
       await _logEvent('schedule_adherence_hit');
@@ -462,6 +467,7 @@ class SleepWellState extends ChangeNotifier {
     await _cancelSleepTimer();
     selectedTrack = track;
     isScreenDimmed = false;
+    _seedActiveMixKindsForTrack(track);
     sessions.add(SleepSession(DateTime.now(), 0));
     await _startSession(mode: 'player', entryPoint: 'player_track_tap');
     await _playSelectedTrack();
@@ -513,6 +519,8 @@ class SleepWellState extends ChangeNotifier {
     }
     _activeSessionId = null;
     _sessionStartedAt = null;
+    _activeMixKinds.clear();
+    await _persistLocalState();
     await refreshInsights();
     notifyListeners();
   }
@@ -590,6 +598,225 @@ class SleepWellState extends ChangeNotifier {
       lastError = 'Could not save preset to API.';
       notifyListeners();
     }
+  }
+
+  List<SavedContentItem> get savedMixItems {
+    final items = <SavedContentItem>[...localMixItems];
+    final refs = items.map((item) => item.itemRef).toSet();
+    for (final item in savedCloudItems.where((saved) => saved.itemType == 'mix')) {
+      if (refs.add(item.itemRef)) {
+        items.add(item);
+      }
+    }
+    items.sort((a, b) => (b.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0))
+        .compareTo(a.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0)));
+    return items;
+  }
+
+  bool isMixSaved({
+    SleepTrack? track,
+    TrackPlayerKind? activeKind,
+  }) {
+    return savedMixFor(track: track, activeKind: activeKind) != null;
+  }
+
+  SavedContentItem? savedMixFor({
+    SleepTrack? track,
+    TrackPlayerKind? activeKind,
+  }) {
+    final ref = _mixItemRef(track: track, activeKind: activeKind);
+    for (final item in savedMixItems) {
+      if (item.itemRef == ref) {
+        return item;
+      }
+    }
+    return null;
+  }
+
+  Future<SavedContentItem> saveNamedMix({
+    required String name,
+    SleepTrack? track,
+    TrackPlayerKind? activeKind,
+  }) async {
+    final baseTrack = track ?? selectedTrack;
+    if (baseTrack == null) {
+      throw StateError('No track selected.');
+    }
+    final normalizedKind = _normalizedTrackKind(activeKind ?? baseTrack.playerKind);
+    final includedKinds = _currentMixKinds(normalizedKind);
+    final itemCount = max(1, includedKinds.length);
+    final now = DateTime.now();
+    final mixItem = SavedContentItem(
+      id: -now.microsecondsSinceEpoch,
+      itemType: 'mix',
+      itemRef: _mixItemRef(track: baseTrack, activeKind: normalizedKind),
+      title: name,
+      subtitle: 'Mix • $itemCount ${itemCount == 1 ? 'item' : 'items'}',
+      meta: <String, dynamic>{
+        'track_id': baseTrack.id,
+        'track_title': baseTrack.title,
+        'track_kind': normalizedKind.name,
+        'channels': _normalizedMixerChannels(),
+        'included_types': includedKinds,
+        'item_count': itemCount,
+      },
+      updatedAt: now,
+    );
+
+    localMixItems.removeWhere((item) => item.itemRef == mixItem.itemRef);
+    localMixItems.insert(0, mixItem);
+    await _persistLocalState();
+
+    if (isAuthenticated) {
+      try {
+        await _api.upsertSavedItem(
+          itemType: 'mix',
+          itemRef: mixItem.itemRef,
+          title: mixItem.title,
+          subtitle: mixItem.subtitle,
+          meta: mixItem.meta,
+        );
+        await refreshCloudSavedItems();
+        apiConnected = true;
+      } catch (_) {
+        apiConnected = false;
+      }
+    }
+    notifyListeners();
+    return mixItem;
+  }
+
+  Future<void> deleteMix({
+    SleepTrack? track,
+    TrackPlayerKind? activeKind,
+  }) async {
+    final item = savedMixFor(track: track, activeKind: activeKind);
+    if (item == null) {
+      return;
+    }
+    await deleteMixByRef(item.itemRef);
+  }
+
+  Future<void> deleteMixByRef(String itemRef) async {
+    localMixItems.removeWhere((saved) => saved.itemRef == itemRef);
+    if (isAuthenticated) {
+      final cloudItems = savedCloudItems
+          .where((saved) => saved.itemType == 'mix' && saved.itemRef == itemRef)
+          .toList();
+      for (final cloud in cloudItems) {
+        try {
+          await _api.deleteSavedItem(cloud.id);
+        } catch (_) {
+          apiConnected = false;
+        }
+      }
+      await refreshCloudSavedItems();
+    }
+    await _persistLocalState();
+    notifyListeners();
+  }
+
+  Future<void> playSavedMix(SavedContentItem item) async {
+    final meta = item.meta;
+    SleepTrack? target;
+    final trackId = _nullableInt(meta['track_id']);
+    final trackTitle = meta['track_title']?.toString();
+    if (trackId != null) {
+      for (final track in tracks) {
+        if (track.id == trackId) {
+          target = track;
+          break;
+        }
+      }
+    }
+    if (target == null && trackTitle != null && trackTitle.isNotEmpty) {
+      for (final track in tracks) {
+        if (track.title.toLowerCase() == trackTitle.toLowerCase()) {
+          target = track;
+          break;
+        }
+      }
+    }
+    target ??= selectedTrack ?? (tracks.isNotEmpty ? tracks.first : null);
+    if (target == null) {
+      return;
+    }
+
+    await playTrack(target);
+
+    final channelsRaw = meta['channels'] is Map<String, dynamic>
+        ? meta['channels'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    for (final entry in channelsRaw.entries) {
+      final value = _toDouble(entry.value).clamp(0.0, 1.0);
+      mixer[entry.key] = value;
+      if (_enableAudio && isMixerPlaying && _mixerPlayers[entry.key] != null) {
+        await _mixerPlayers[entry.key]!.setVolume(value);
+      }
+    }
+
+    final includedRaw = meta['included_types'] is List
+        ? (meta['included_types'] as List).map((value) => '$value').toList()
+        : <String>[];
+    _activeMixKinds
+      ..clear()
+      ..addAll(includedRaw.where((value) => value.isNotEmpty));
+    if (_activeMixKinds.isEmpty) {
+      _seedActiveMixKindsForTrack(target);
+    }
+    await _persistLocalState();
+    notifyListeners();
+  }
+
+  void enableMixKind(TrackPlayerKind kind) {
+    final normalized = _normalizedTrackKind(kind);
+    if (_activeMixKinds.add(normalized.name)) {
+      unawaited(_persistLocalState());
+      notifyListeners();
+    }
+  }
+
+  TrackPlayerKind _normalizedTrackKind(TrackPlayerKind kind) {
+    return kind == TrackPlayerKind.other ? TrackPlayerKind.meditation : kind;
+  }
+
+  void _seedActiveMixKindsForTrack(SleepTrack track) {
+    _activeMixKinds
+      ..clear()
+      ..add(_normalizedTrackKind(track.playerKind).name);
+    unawaited(_persistLocalState());
+  }
+
+  List<String> _currentMixKinds(TrackPlayerKind fallbackKind) {
+    final kinds = _activeMixKinds.isEmpty ? <String>[fallbackKind.name] : _activeMixKinds.toList();
+    kinds.sort();
+    return kinds;
+  }
+
+  Map<String, double> _normalizedMixerChannels() {
+    final channels = <String, double>{};
+    final keys = mixer.keys.toList()..sort();
+    for (final key in keys) {
+      channels[key] = mixer[key]!.clamp(0.0, 1.0);
+    }
+    return channels;
+  }
+
+  String _mixItemRef({
+    SleepTrack? track,
+    TrackPlayerKind? activeKind,
+  }) {
+    final baseTrack = track ?? selectedTrack;
+    final fallbackKind = activeKind ??
+        (baseTrack == null ? TrackPlayerKind.meditation : _normalizedTrackKind(baseTrack.playerKind));
+    final payload = <String, dynamic>{
+      'track_id': baseTrack?.id,
+      'track_title': baseTrack?.title ?? '',
+      'track_kind': fallbackKind.name,
+      'included_types': _currentMixKinds(fallbackKind),
+      'channels': _normalizedMixerChannels(),
+    };
+    return base64Url.encode(utf8.encode(jsonEncode(payload)));
   }
 
   Future<void> refreshMixPresets() async {
@@ -973,6 +1200,23 @@ class SleepWellState extends ChangeNotifier {
     localDownloadRefs
       ..clear()
       ..addAll(prefs.getStringList('local_downloads') ?? const <String>[]);
+    final localMixesRaw = prefs.getString('local_mix_items');
+    if (localMixesRaw != null && localMixesRaw.isNotEmpty) {
+      final decoded = jsonDecode(localMixesRaw);
+      if (decoded is List) {
+        localMixItems
+          ..clear()
+          ..addAll(
+            decoded
+                .whereType<Map<String, dynamic>>()
+                .map(SavedContentItem.fromJson),
+          );
+      }
+    }
+    final activeMixKindsRaw = prefs.getStringList('active_mix_kinds') ?? const <String>[];
+    _activeMixKinds
+      ..clear()
+      ..addAll(activeMixKindsRaw);
 
     preferredCategories
       ..clear()
@@ -1038,6 +1282,11 @@ class SleepWellState extends ChangeNotifier {
     await prefs.setString('queued_events', jsonEncode(_queuedEvents));
     await prefs.setStringList('local_favorites', localFavoriteRefs.toList());
     await prefs.setStringList('local_downloads', localDownloadRefs.toList());
+    await prefs.setString(
+      'local_mix_items',
+      jsonEncode(localMixItems.map((item) => item.toJson()).toList()),
+    );
+    await prefs.setStringList('active_mix_kinds', _activeMixKinds.toList());
     await prefs.setString('settings_toggles', jsonEncode(settingsToggles));
     await prefs.setString('sync_status', syncStatus);
     await prefs.setInt('sync_failure_count', syncFailureCount);
@@ -3377,141 +3626,157 @@ class _SavedPageState extends State<SavedPage> {
 
   @override
   Widget build(BuildContext context) {
-    final state = widget.state;
-    final favorites = state.sectionByKey('saved_favorites');
-    final recentlyPlayed = state.sectionByKey('saved_recently_played');
-    final playlists = state.sectionByKey('saved_playlists');
-    final findLove = state.sectionByKey('saved_find_love');
-    final suggestions = state.sectionByKey('saved_suggestions');
-    final activeSection = switch (_tabIndex) {
-      0 => state.isAuthenticated && state.savedCloudItems.isNotEmpty
-          ? HomeSectionContent(
-              sectionKey: 'saved_cloud_favorites',
-              title: 'Favorites',
-              subtitle: null,
-              sectionType: 'horizontal',
-              items: state.savedCloudItems
-                  .map(
-                    (item) => HomeItemContent(
-                      title: item.title,
-                      subtitle: item.subtitle,
-                      meta: item.meta,
-                    ),
-                  )
-                  .toList(),
-            )
-          : favorites,
-      1 => recentlyPlayed,
-      _ => playlists,
-    };
-    final showFindLoveGrid = _tabIndex != 0;
-
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [Color(0xFF1F1934), Color(0xFF0D0F1D), Color(0xFF090C18)],
-              ),
-            ),
-          ),
-        ),
-        ListView(
-          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
-          padding: const EdgeInsets.fromLTRB(_UiBaseline.pageHorizontal, 6, _UiBaseline.pageHorizontal, 190),
-          children: [
-            const SizedBox(height: 6),
-            const Center(
-              child: Text(
-                'My Library',
-                style: TextStyle(fontSize: _UiBaseline.savedTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
-              ),
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              height: _UiBaseline.savedTabHeight,
-              child: ListView.separated(
-                physics: const BouncingScrollPhysics(),
-                scrollDirection: Axis.horizontal,
-                itemCount: _tabs.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 10),
-                itemBuilder: (_, idx) {
-                  final selected = idx == _tabIndex;
-                  return InkWell(
-                    borderRadius: BorderRadius.circular(999),
-                    onTap: () => setState(() => _tabIndex = idx),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 170),
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      decoration: BoxDecoration(
-                        color: selected ? Colors.white : Colors.white.withValues(alpha: 0.03),
-                        borderRadius: BorderRadius.circular(999),
-                        border: Border.all(color: selected ? Colors.white : Colors.white24, width: 1.4),
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                        _tabs[idx],
-                        style: TextStyle(
-                          color: selected ? Colors.black : Colors.white,
-                          fontWeight: FontWeight.w700,
-                          fontSize: _UiBaseline.savedTabFontSize,
+    return AnimatedBuilder(
+      animation: widget.state,
+      builder: (context, _) {
+        final state = widget.state;
+        final savedMixes = state.savedMixItems;
+        final favorites = state.sectionByKey('saved_favorites');
+        final recentlyPlayed = state.sectionByKey('saved_recently_played');
+        final playlists = state.sectionByKey('saved_playlists');
+        final findLove = state.sectionByKey('saved_find_love');
+        final suggestions = state.sectionByKey('saved_suggestions');
+        final activeSection = switch (_tabIndex) {
+          0 => state.isAuthenticated && state.savedCloudItems.isNotEmpty
+              ? HomeSectionContent(
+                  sectionKey: 'saved_cloud_favorites',
+                  title: 'Favorites',
+                  subtitle: null,
+                  sectionType: 'horizontal',
+                  items: state.savedCloudItems
+                      .where((item) => item.itemType != 'mix')
+                      .map(
+                        (item) => HomeItemContent(
+                          title: item.title,
+                          subtitle: item.subtitle,
+                          meta: item.meta,
                         ),
-                      ),
-                    ),
-                  );
-                },
+                      )
+                      .toList(),
+                )
+              : favorites,
+          1 => recentlyPlayed,
+          _ => playlists,
+        };
+        final showFindLoveGrid = _tabIndex != 0;
+
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: Container(
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Color(0xFF1F1934), Color(0xFF0D0F1D), Color(0xFF090C18)],
+                  ),
+                ),
               ),
             ),
-            const SizedBox(height: 12),
-            if ((activeSection?.subtitle ?? '').isNotEmpty) ...[
-              Text(
-                activeSection!.subtitle!,
-                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, letterSpacing: -0.2),
-              ),
-              const SizedBox(height: 6),
-            ],
-            if (activeSection != null)
-              ...activeSection.items.map((item) => _libraryRow(item: item, tabIndex: _tabIndex, state: state))
-            else
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 18),
-                child: Text('No saved items yet.', style: TextStyle(color: Colors.white70)),
-              ),
-            if (_tabIndex == 0 && suggestions != null && suggestions.items.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(
-                suggestions.title ?? 'Suggestions for you',
-                style: const TextStyle(fontSize: _UiBaseline.savedSectionTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
-              ),
-              const SizedBox(height: 8),
-              ...suggestions.items.map((item) => _libraryRow(item: item, tabIndex: _tabIndex, state: state)),
-            ],
-            if (showFindLoveGrid && findLove != null && findLove.items.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Text(
-                findLove.title ?? 'Find something you love',
-                style: const TextStyle(fontSize: _UiBaseline.savedSectionTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
-              ),
-              const SizedBox(height: 12),
-              GridView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: findLove.items.length,
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 2,
-                  crossAxisSpacing: 10,
-                  mainAxisSpacing: 10,
-                  childAspectRatio: 1.0,
+            ListView(
+              physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+              padding: const EdgeInsets.fromLTRB(_UiBaseline.pageHorizontal, 6, _UiBaseline.pageHorizontal, 190),
+              children: [
+                const SizedBox(height: 6),
+                const Center(
+                  child: Text(
+                    'My Library',
+                    style: TextStyle(fontSize: _UiBaseline.savedTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                  ),
                 ),
-                itemBuilder: (_, idx) => _suggestionCard(findLove.items[idx]),
-              ),
-            ],
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: _UiBaseline.savedTabHeight,
+                  child: ListView.separated(
+                    physics: const BouncingScrollPhysics(),
+                    scrollDirection: Axis.horizontal,
+                    itemCount: _tabs.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+                    itemBuilder: (_, idx) {
+                      final selected = idx == _tabIndex;
+                      return InkWell(
+                        borderRadius: BorderRadius.circular(999),
+                        onTap: () => setState(() => _tabIndex = idx),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 170),
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          decoration: BoxDecoration(
+                            color: selected ? Colors.white : Colors.white.withValues(alpha: 0.03),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(color: selected ? Colors.white : Colors.white24, width: 1.4),
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            _tabs[idx],
+                            style: TextStyle(
+                              color: selected ? Colors.black : Colors.white,
+                              fontWeight: FontWeight.w700,
+                              fontSize: _UiBaseline.savedTabFontSize,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+                if (_tabIndex == 0 && savedMixes.isNotEmpty) ...[
+                  Text(
+                    'Mixes (${savedMixes.length})',
+                    style: const TextStyle(fontSize: _UiBaseline.savedSectionTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                  ),
+                  const SizedBox(height: 8),
+                  ...savedMixes.map((item) => _mixLibraryRow(item: item, state: state)),
+                  const SizedBox(height: 10),
+                ],
+                if ((activeSection?.subtitle ?? '').isNotEmpty) ...[
+                  Text(
+                    activeSection!.subtitle!,
+                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, letterSpacing: -0.2),
+                  ),
+                  const SizedBox(height: 6),
+                ],
+                if (activeSection != null)
+                  ...activeSection.items.map((item) => _libraryRow(item: item, tabIndex: _tabIndex, state: state))
+                else
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 18),
+                    child: Text('No saved items yet.', style: TextStyle(color: Colors.white70)),
+                  ),
+                if (_tabIndex == 0 && suggestions != null && suggestions.items.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    suggestions.title ?? 'Suggestions for you',
+                    style: const TextStyle(fontSize: _UiBaseline.savedSectionTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                  ),
+                  const SizedBox(height: 8),
+                  ...suggestions.items.map((item) => _libraryRow(item: item, tabIndex: _tabIndex, state: state)),
+                ],
+                if (showFindLoveGrid && findLove != null && findLove.items.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    findLove.title ?? 'Find something you love',
+                    style: const TextStyle(fontSize: _UiBaseline.savedSectionTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+                  ),
+                  const SizedBox(height: 12),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: findLove.items.length,
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                      childAspectRatio: 1.0,
+                    ),
+                    itemBuilder: (_, idx) => _suggestionCard(findLove.items[idx]),
+                  ),
+                ],
+              ],
+            ),
           ],
-        ),
-      ],
+        );
+      },
     );
   }
 
@@ -3602,6 +3867,118 @@ class _SavedPageState extends State<SavedPage> {
       return const Icon(Icons.favorite_border_rounded, size: 22);
     }
     return const Icon(Icons.more_horiz_rounded, size: 24);
+  }
+
+  Widget _mixLibraryRow({
+    required SavedContentItem item,
+    required SleepWellState state,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: () async {
+        await state.playSavedMix(item);
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                width: _UiBaseline.savedThumbSize,
+                height: _UiBaseline.savedThumbSize,
+                child: _savedArtworkThumb(item.title, compact: true),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: _UiBaseline.savedRowTitleSize,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.25,
+                    ),
+                  ),
+                  if ((item.subtitle ?? '').isNotEmpty)
+                    Text(
+                      item.subtitle!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: _UiBaseline.savedRowSubtitleSize,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.more_horiz_rounded),
+              onPressed: () async {
+                final shouldDelete = await showDialog<bool>(
+                  context: context,
+                  builder: (dialogContext) => Dialog(
+                    backgroundColor: const Color(0xFF242657),
+                    insetPadding: const EdgeInsets.symmetric(horizontal: 22),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 24, 24, 26),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Align(
+                            alignment: Alignment.topRight,
+                            child: IconButton(
+                              onPressed: () => Navigator.of(dialogContext).pop(false),
+                              icon: const Icon(Icons.close_rounded),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Delete',
+                            style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 14),
+                          const Text(
+                            'Are you sure you want to delete this mix?',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 16, color: Colors.white70),
+                          ),
+                          const SizedBox(height: 26),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFE55A54),
+                                foregroundColor: Colors.white,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                                minimumSize: const Size.fromHeight(56),
+                              ),
+                              onPressed: () => Navigator.of(dialogContext).pop(true),
+                              child: const Text('Delete', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+                if (shouldDelete == true) {
+                  await state.deleteMixByRef(item.itemRef);
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _suggestionCard(HomeItemContent item) {
@@ -6296,313 +6673,321 @@ class NowPlayingPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isFavorite = state.isFavoriteTrack(track);
-    final activeKind = track.playerKind == TrackPlayerKind.other
-        ? TrackPlayerKind.meditation
-        : track.playerKind;
-    if (activeKind == TrackPlayerKind.sound ||
-        activeKind == TrackPlayerKind.brainwave) {
-      return _buildAmbientStylePlayer(context, activeKind);
-    }
-    final currentSectionLabel = _primarySectionLabel(activeKind);
-    final duration = state.currentDuration.inMilliseconds <= 0
-        ? Duration(seconds: max(track.durationSeconds, 1))
-        : state.currentDuration;
-    final positionMs = min(state.currentPosition.inMilliseconds, duration.inMilliseconds).toDouble();
-    return Scaffold(
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: Container(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [Color(0xFF17495D), Color(0xFF11162A), Color(0xFF171E37)],
+    return AnimatedBuilder(
+      animation: state,
+      builder: (context, _) {
+        final isFavorite = state.isFavoriteTrack(track);
+        final activeKind = track.playerKind == TrackPlayerKind.other
+            ? TrackPlayerKind.meditation
+            : track.playerKind;
+        if (activeKind == TrackPlayerKind.sound ||
+            activeKind == TrackPlayerKind.brainwave) {
+          return _buildAmbientStylePlayer(context, activeKind);
+        }
+        final currentSectionLabel = _primarySectionLabel(activeKind);
+        final duration = state.currentDuration.inMilliseconds <= 0
+            ? Duration(seconds: max(track.durationSeconds, 1))
+            : state.currentDuration;
+        final positionMs = min(state.currentPosition.inMilliseconds, duration.inMilliseconds).toDouble();
+        return Scaffold(
+          body: Stack(
+            children: [
+              Positioned.fill(
+                child: Container(
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0xFF17495D), Color(0xFF11162A), Color(0xFF171E37)],
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ),
-          SafeArea(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final artworkHeight = (constraints.maxHeight * 0.28).clamp(160.0, 220.0).toDouble();
-                return ListView(
-                  physics: const BouncingScrollPhysics(),
-                  padding: const EdgeInsets.only(bottom: 12),
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                      child: Row(
-                        children: [
-                          IconButton(
-                            onPressed: () => _minimizePlayer(context),
-                            icon: const Icon(Icons.keyboard_arrow_down),
-                          ),
-                          const Spacer(),
-                          FilledButton.tonal(
-                            style: FilledButton.styleFrom(
-                              backgroundColor: Colors.white.withValues(alpha: 0.14),
-                              foregroundColor: Colors.white,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-                            ),
-                            onPressed: () async {
-                              await state.stopPlayback();
-                              if (context.mounted) {
-                                Navigator.pop(context);
-                              }
-                            },
-                            child: const Text('End Session'),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Container(
-                      height: artworkHeight,
-                      margin: const EdgeInsets.symmetric(horizontal: _UiBaseline.pageHorizontal),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(_UiBaseline.radiusLg),
-                        gradient: const LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [Color(0xFF2BBAB6), Color(0xFF142E45)],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 20),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(track.title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                          const SizedBox(height: 4),
-                          const Text('Narrated by Aster J. Haile', style: TextStyle(color: Colors.white70)),
-                          const SizedBox(height: 8),
-                          SliderTheme(
-                            data: SliderTheme.of(context).copyWith(
-                              trackHeight: 5.5,
-                              activeTrackColor: const Color(0xFFB9A7FF),
-                              inactiveTrackColor: Colors.white24,
-                              thumbColor: Colors.white,
-                              overlayColor: Colors.white24,
-                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                            ),
-                            child: Slider(
-                              value: positionMs,
-                              min: 0,
-                              max: duration.inMilliseconds.toDouble(),
-                              onChanged: (value) async {
-                                final target = Duration(milliseconds: value.round());
-                                await state.seekTo(target);
-                              },
-                              onChangeEnd: (_) async {
-                                await state.logUiAction('seek_track_position');
-                              },
-                            ),
-                          ),
-                          Row(
+              SafeArea(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final artworkHeight = (constraints.maxHeight * 0.28).clamp(160.0, 220.0).toDouble();
+                    return ListView(
+                      physics: const BouncingScrollPhysics(),
+                      padding: const EdgeInsets.only(bottom: 12),
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                          child: Row(
                             children: [
-                              Text(_formatDuration(state.currentPosition), style: const TextStyle(color: Colors.white70)),
+                              IconButton(
+                                onPressed: () => _minimizePlayer(context),
+                                icon: const Icon(Icons.keyboard_arrow_down),
+                              ),
                               const Spacer(),
-                              Text(_formatDuration(duration), style: const TextStyle(color: Colors.white70)),
+                              FilledButton.tonal(
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: Colors.white.withValues(alpha: 0.14),
+                                  foregroundColor: Colors.white,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                                ),
+                                onPressed: () async {
+                                  await state.stopPlayback();
+                                  if (context.mounted) {
+                                    Navigator.pop(context);
+                                  }
+                                },
+                                child: const Text('End Session'),
+                              ),
                             ],
                           ),
-                          const SizedBox(height: 6),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        ),
+                        Container(
+                          height: artworkHeight,
+                          margin: const EdgeInsets.symmetric(horizontal: _UiBaseline.pageHorizontal),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(_UiBaseline.radiusLg),
+                            gradient: const LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [Color(0xFF2BBAB6), Color(0xFF142E45)],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Icon(Icons.more_horiz, size: 30),
-                              IconButton(
-                                icon: const Icon(Icons.skip_previous_rounded, size: 34),
-                                onPressed: () async {
-                                  await state.playRelativeTrack(-1);
-                                  if (!context.mounted) {
-                                    return;
-                                  }
-                                  Navigator.of(context).pushReplacement(
-                                    MaterialPageRoute<void>(
-                                      builder: (_) => _playerPageForTrack(
-                                        state: state,
-                                        track: state.selectedTrack ?? track,
-                                      ),
-                                    ),
-                                  );
-                                },
+                              Text(track.title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                              const SizedBox(height: 4),
+                              const Text('Narrated by Aster J. Haile', style: TextStyle(color: Colors.white70)),
+                              const SizedBox(height: 8),
+                              SliderTheme(
+                                data: SliderTheme.of(context).copyWith(
+                                  trackHeight: 5.5,
+                                  activeTrackColor: const Color(0xFFB9A7FF),
+                                  inactiveTrackColor: Colors.white24,
+                                  thumbColor: Colors.white,
+                                  overlayColor: Colors.white24,
+                                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                                ),
+                                child: Slider(
+                                  value: positionMs,
+                                  min: 0,
+                                  max: duration.inMilliseconds.toDouble(),
+                                  onChanged: (value) async {
+                                    final target = Duration(milliseconds: value.round());
+                                    await state.seekTo(target);
+                                  },
+                                  onChangeEnd: (_) async {
+                                    await state.logUiAction('seek_track_position');
+                                  },
+                                ),
                               ),
-                              IconButton(
-                                iconSize: _UiBaseline.nowPlayingMainButton,
-                                icon: CircleAvatar(
-                                  radius: _UiBaseline.nowPlayingMainButton / 2,
-                                  backgroundColor: Colors.white,
-                                  child: Icon(
-                                    state.isPlaying ? Icons.pause : Icons.play_arrow,
-                                    color: Colors.black,
-                                    size: _UiBaseline.nowPlayingMainIcon,
+                              Row(
+                                children: [
+                                  Text(_formatDuration(state.currentPosition), style: const TextStyle(color: Colors.white70)),
+                                  const Spacer(),
+                                  Text(_formatDuration(duration), style: const TextStyle(color: Colors.white70)),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                children: [
+                                  const Icon(Icons.more_horiz, size: 30),
+                                  IconButton(
+                                    icon: const Icon(Icons.skip_previous_rounded, size: 34),
+                                    onPressed: () async {
+                                      await state.playRelativeTrack(-1);
+                                      if (!context.mounted) {
+                                        return;
+                                      }
+                                      Navigator.of(context).pushReplacement(
+                                        MaterialPageRoute<void>(
+                                          builder: (_) => _playerPageForTrack(
+                                            state: state,
+                                            track: state.selectedTrack ?? track,
+                                          ),
+                                        ),
+                                      );
+                                    },
                                   ),
-                                ),
-                                onPressed: () async => state.togglePlayPause(),
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.skip_next_rounded, size: 34),
-                                onPressed: () async {
-                                  await state.playRelativeTrack(1);
-                                  if (!context.mounted) {
-                                    return;
-                                  }
-                                  Navigator.of(context).pushReplacement(
-                                    MaterialPageRoute<void>(
-                                      builder: (_) => _playerPageForTrack(
-                                        state: state,
-                                        track: state.selectedTrack ?? track,
+                                  IconButton(
+                                    iconSize: _UiBaseline.nowPlayingMainButton,
+                                    icon: CircleAvatar(
+                                      radius: _UiBaseline.nowPlayingMainButton / 2,
+                                      backgroundColor: Colors.white,
+                                      child: Icon(
+                                        state.isPlaying ? Icons.pause : Icons.play_arrow,
+                                        color: Colors.black,
+                                        size: _UiBaseline.nowPlayingMainIcon,
                                       ),
                                     ),
-                                  );
-                                },
-                              ),
-                              IconButton(
-                                icon: Icon(
-                                  isFavorite ? Icons.favorite_rounded : Icons.favorite_border_rounded,
-                                  size: 30,
-                                ),
-                                onPressed: () async {
-                                  await state.toggleFavoriteTrack(track);
-                                  if (!context.mounted) {
-                                    return;
-                                  }
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(
-                                        state.isFavoriteTrack(track)
-                                            ? 'Added to favorites'
-                                            : 'Removed from favorites',
-                                      ),
+                                    onPressed: () async => state.togglePlayPause(),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.skip_next_rounded, size: 34),
+                                    onPressed: () async {
+                                      await state.playRelativeTrack(1);
+                                      if (!context.mounted) {
+                                        return;
+                                      }
+                                      Navigator.of(context).pushReplacement(
+                                        MaterialPageRoute<void>(
+                                          builder: (_) => _playerPageForTrack(
+                                            state: state,
+                                            track: state.selectedTrack ?? track,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                  IconButton(
+                                    icon: Icon(
+                                      isFavorite ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                                      size: 30,
                                     ),
-                                  );
-                                },
+                                    onPressed: () async {
+                                      await state.toggleFavoriteTrack(track);
+                                      if (!context.mounted) {
+                                        return;
+                                      }
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            state.isFavoriteTrack(track)
+                                                ? 'Added to favorites'
+                                                : 'Removed from favorites',
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              Center(
+                                child: FilledButton(
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: Colors.white,
+                                    foregroundColor: Colors.black,
+                                    minimumSize: const Size(220, 50),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                                  ),
+                                  onPressed: () async {
+                                    await state.logUiAction('track_my_sleep_now_playing');
+                                    await state.startSleepNow(entryPoint: 'track_detail_track_sleep');
+                                    if (!context.mounted) {
+                                      return;
+                                    }
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Sleep tracking started')),
+                                    );
+                                  },
+                                  child: const Text('Track My Sleep'),
+                                ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 10),
-                          Center(
-                            child: FilledButton(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: Colors.white,
-                                foregroundColor: Colors.black,
-                                minimumSize: const Size(220, 50),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                        ),
+                        const SizedBox(height: 10),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF1B2442),
+                            borderRadius: BorderRadius.vertical(top: Radius.circular(_UiBaseline.radiusXl)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Center(child: Text('Adjust Sounds', style: TextStyle(fontWeight: FontWeight.w700))),
+                              const SizedBox(height: 10),
+                              Text(currentSectionLabel, style: const TextStyle(fontWeight: FontWeight.w700)),
+                              ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: const CircleAvatar(child: Icon(Icons.volume_up_rounded)),
+                                title: Text(track.title),
+                                subtitle: Slider(
+                                  value: state.mainPlayerVolume,
+                                  onChanged: (v) async => state.setMainPlayerVolume(v),
+                                ),
                               ),
-                              onPressed: () async {
-                                await state.logUiAction('track_my_sleep_now_playing');
-                                await state.startSleepNow(entryPoint: 'track_detail_track_sleep');
-                                if (!context.mounted) {
-                                  return;
-                                }
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Sleep tracking started')),
-                                );
-                              },
-                              child: const Text('Track My Sleep'),
-                            ),
+                              if (activeKind != TrackPlayerKind.sound) ...[
+                                const Divider(color: Colors.white12),
+                                _adjustRow(
+                                  title: 'Sounds',
+                                  subtitle: 'Include relaxing sounds.',
+                                  button: 'Add Sounds',
+                                  onPressed: () async {
+                                    state.enableMixKind(TrackPlayerKind.sound);
+                                    if (!state.isMixerPlaying) {
+                                      await state.toggleMixerPlayback();
+                                    }
+                                    await state.logUiAction('add_sounds_now_playing');
+                                    if (!context.mounted) {
+                                      return;
+                                    }
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Relaxing sounds added to mix.')),
+                                    );
+                                  },
+                                ),
+                              ],
+                              if (activeKind != TrackPlayerKind.music) ...[
+                                const Divider(color: Colors.white12),
+                                _adjustRow(
+                                  title: 'Music',
+                                  subtitle: 'Enhance your mix with music.',
+                                  button: 'Add Music',
+                                  onPressed: () async {
+                                    state.enableMixKind(TrackPlayerKind.music);
+                                    final boosted = min(1.0, state.mainPlayerVolume + 0.1);
+                                    await state.setMainPlayerVolume(boosted);
+                                    await state.logUiAction('add_music_now_playing');
+                                    if (!context.mounted) {
+                                      return;
+                                    }
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Music level boosted.')),
+                                    );
+                                  },
+                                ),
+                              ],
+                              if (activeKind != TrackPlayerKind.brainwave) ...[
+                                const Divider(color: Colors.white12),
+                                _adjustRow(
+                                  title: 'Brainwaves',
+                                  subtitle: 'Elevate your mix.',
+                                  button: 'Add Brainwave',
+                                  onPressed: () async {
+                                    state.enableMixKind(TrackPlayerKind.brainwave);
+                                    await state.logUiAction('add_brainwave_now_playing');
+                                    if (!context.mounted) {
+                                      return;
+                                    }
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Brainwave added to mix.')),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ],
                           ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF1B2442),
-                        borderRadius: BorderRadius.vertical(top: Radius.circular(_UiBaseline.radiusXl)),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Center(child: Text('Adjust Sounds', style: TextStyle(fontWeight: FontWeight.w700))),
-                          const SizedBox(height: 10),
-                          Text(currentSectionLabel, style: const TextStyle(fontWeight: FontWeight.w700)),
-                          ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: const CircleAvatar(child: Icon(Icons.volume_up_rounded)),
-                            title: Text(track.title),
-                            subtitle: Slider(
-                              value: state.mainPlayerVolume,
-                              onChanged: (v) async => state.setMainPlayerVolume(v),
-                            ),
-                          ),
-                          if (activeKind != TrackPlayerKind.sound) ...[
-                            const Divider(color: Colors.white12),
-                            _adjustRow(
-                              title: 'Sounds',
-                              subtitle: 'Include relaxing sounds.',
-                              button: 'Add Sounds',
-                              onPressed: () async {
-                                if (!state.isMixerPlaying) {
-                                  await state.toggleMixerPlayback();
-                                }
-                                await state.logUiAction('add_sounds_now_playing');
-                                if (!context.mounted) {
-                                  return;
-                                }
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Relaxing sounds added to mix.')),
-                                );
-                              },
-                            ),
-                          ],
-                          if (activeKind != TrackPlayerKind.music) ...[
-                            const Divider(color: Colors.white12),
-                            _adjustRow(
-                              title: 'Music',
-                              subtitle: 'Enhance your mix with music.',
-                              button: 'Add Music',
-                              onPressed: () async {
-                                final boosted = min(1.0, state.mainPlayerVolume + 0.1);
-                                await state.setMainPlayerVolume(boosted);
-                                await state.logUiAction('add_music_now_playing');
-                                if (!context.mounted) {
-                                  return;
-                                }
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Music level boosted.')),
-                                );
-                              },
-                            ),
-                          ],
-                          if (activeKind != TrackPlayerKind.brainwave) ...[
-                            const Divider(color: Colors.white12),
-                            _adjustRow(
-                              title: 'Brainwaves',
-                              subtitle: 'Elevate your mix.',
-                              button: 'Add Brainwave',
-                              onPressed: () async {
-                                await state.saveCurrentMixPreset();
-                                await state.logUiAction('add_brainwave_now_playing');
-                                if (!context.mounted) {
-                                  return;
-                                }
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Brainwave preset saved.')),
-                                );
-                              },
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
   Widget _buildAmbientStylePlayer(BuildContext context, TrackPlayerKind activeKind) {
     final selectedTrack = state.selectedTrack ?? track;
+    final isSavedMix = state.isMixSaved(track: selectedTrack, activeKind: activeKind);
     return Scaffold(
       body: Stack(
         children: [
@@ -6733,9 +7118,14 @@ class NowPlayingPage extends StatelessWidget {
                             onTap: () async => state.togglePlayPause(),
                           ),
                           _ambientFooterAction(
-                            icon: Icons.favorite_border_rounded,
-                            label: 'Save Mix',
-                            onTap: () async => state.saveCurrentMixPreset(),
+                            icon: isSavedMix ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                            label: isSavedMix ? 'Saved Mix' : 'Save Mix',
+                            active: isSavedMix,
+                            onTap: () async => _handleSaveMixPressed(
+                              context,
+                              track: selectedTrack,
+                              activeKind: activeKind,
+                            ),
                           ),
                         ],
                       ),
@@ -6892,6 +7282,7 @@ class NowPlayingPage extends StatelessWidget {
     required String label,
     required VoidCallback onTap,
     bool emphasized = false,
+    bool active = false,
   }) {
     return InkWell(
       borderRadius: BorderRadius.circular(999),
@@ -6900,12 +7291,23 @@ class NowPlayingPage extends StatelessWidget {
         children: [
           CircleAvatar(
             radius: emphasized ? 32 : 22,
-            backgroundColor: Colors.white.withValues(alpha: emphasized ? 0.95 : 0.2),
-            child: Icon(icon, color: emphasized ? Colors.black : Colors.white),
+            backgroundColor: active
+                ? const Color(0xFFFF7BA5).withValues(alpha: 0.92)
+                : Colors.white.withValues(alpha: emphasized ? 0.95 : 0.2),
+            child: Icon(
+              icon,
+              color: emphasized ? Colors.black : (active ? Colors.white : Colors.white),
+            ),
           ),
           if (label.isNotEmpty) ...[
             const SizedBox(height: 6),
-            Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
+            Text(
+              label,
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                color: active ? const Color(0xFFFFD6E4) : Colors.white,
+              ),
+            ),
           ],
         ],
       ),
@@ -6946,9 +7348,162 @@ class NowPlayingPage extends StatelessWidget {
     navigator.popUntil((route) => route.isFirst);
   }
 
+  Future<void> _handleSaveMixPressed(
+    BuildContext context, {
+    required SleepTrack track,
+    required TrackPlayerKind activeKind,
+  }) async {
+    if (state.isMixSaved(track: track, activeKind: activeKind)) {
+      final shouldDelete = await _showDeleteMixDialog(context);
+      if (shouldDelete == true) {
+        await state.deleteMix(track: track, activeKind: activeKind);
+      }
+      return;
+    }
+
+    final name = await _showSaveMixDialog(context);
+    if (name == null || name.trim().isEmpty) {
+      return;
+    }
+    await state.saveNamedMix(
+      name: name.trim(),
+      track: track,
+      activeKind: activeKind,
+    );
+    if (!context.mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('"${name.trim()}" saved to your library.')),
+    );
+  }
+
+  Future<String?> _showSaveMixDialog(BuildContext context) async {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return Dialog(
+          backgroundColor: const Color(0xFF242657),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 18),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              24,
+              24,
+              24,
+              24 + MediaQuery.of(dialogContext).viewInsets.bottom,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Align(
+                  alignment: Alignment.topRight,
+                  child: IconButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(),
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Name your mix',
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 30),
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  textInputAction: TextInputAction.done,
+                  decoration: const InputDecoration(
+                    hintText: 'Enter mix name',
+                    enabledBorder: UnderlineInputBorder(
+                      borderSide: BorderSide(color: Colors.white54),
+                    ),
+                    focusedBorder: UnderlineInputBorder(
+                      borderSide: BorderSide(color: Colors.white),
+                    ),
+                  ),
+                  onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+                ),
+                const SizedBox(height: 28),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: Colors.black,
+                      minimumSize: const Size.fromHeight(56),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                    ),
+                    onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+                    child: const Text('Save', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<bool?> _showDeleteMixDialog(BuildContext context) {
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return Dialog(
+          backgroundColor: const Color(0xFF242657),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 18),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 26),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Align(
+                  alignment: Alignment.topRight,
+                  child: IconButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(false),
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Delete',
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 14),
+                const Text(
+                  'Are you sure you want to delete this mix?',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 16, color: Colors.white70),
+                ),
+                const SizedBox(height: 26),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFE55A54),
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size.fromHeight(56),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                    ),
+                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                    child: const Text('Delete', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _handleAmbientAddAction(BuildContext context, TrackPlayerKind sectionKind) async {
     switch (sectionKind) {
       case TrackPlayerKind.sound:
+        state.enableMixKind(TrackPlayerKind.sound);
         if (!state.isMixerPlaying) {
           await state.toggleMixerPlayback();
         }
@@ -6961,6 +7516,7 @@ class NowPlayingPage extends StatelessWidget {
         );
         break;
       case TrackPlayerKind.music:
+        state.enableMixKind(TrackPlayerKind.music);
         final boosted = min(1.0, state.mainPlayerVolume + 0.1);
         await state.setMainPlayerVolume(boosted);
         await state.logUiAction('ambient_add_music');
@@ -6972,13 +7528,13 @@ class NowPlayingPage extends StatelessWidget {
         );
         break;
       case TrackPlayerKind.brainwave:
-        await state.saveCurrentMixPreset();
+        state.enableMixKind(TrackPlayerKind.brainwave);
         await state.logUiAction('ambient_add_brainwave');
         if (!context.mounted) {
           return;
         }
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Brainwave preset saved.')),
+          const SnackBar(content: Text('Brainwave added to mix.')),
         );
         break;
       case TrackPlayerKind.meditation:
@@ -7476,6 +8032,18 @@ class SavedContentItem {
       meta: meta,
       updatedAt: DateTime.tryParse('${json['updated_at'] ?? ''}'),
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'item_type': itemType,
+      'item_ref': itemRef,
+      'title': title,
+      'subtitle': subtitle,
+      'meta': meta,
+      'updated_at': updatedAt?.toIso8601String(),
+    };
   }
 }
 
