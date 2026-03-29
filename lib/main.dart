@@ -7966,6 +7966,7 @@ class SleepRecorderFlowPage extends StatefulWidget {
 class _SleepRecorderFlowPageState extends State<SleepRecorderFlowPage> {
   late int _step;
   late double _goalHours;
+  int _activeRecorderTabIndex = 0;
   Timer? _clockTicker;
   DateTime _now = DateTime.now();
 
@@ -8336,8 +8337,8 @@ class _SleepRecorderFlowPageState extends State<SleepRecorderFlowPage> {
   Widget _activeRecorderStep(BuildContext context) {
     final state = widget.state;
     final track = state.selectedTrack ?? widget.preferredTrack;
-    final savedMixes = state.savedMixItems.take(4).toList();
     final timerText = state.hasActiveSleepTimer ? _formatTimerCountdown(state.remainingSleepTimer) : null;
+    final tabLabels = <String>['Recent', 'Favorites', 'Recommended', 'Mixes'];
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 18, 14, 18),
       child: Column(
@@ -8381,13 +8382,38 @@ class _SleepRecorderFlowPageState extends State<SleepRecorderFlowPage> {
                 ),
                 const SizedBox(height: 22),
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: const [
-                    Text('Recent', style: TextStyle(fontWeight: FontWeight.w800)),
-                    Text('Favorites', style: TextStyle(color: Colors.white54, fontWeight: FontWeight.w700)),
-                    Text('Recommended', style: TextStyle(color: Colors.white54, fontWeight: FontWeight.w700)),
-                    Text('Mixes', style: TextStyle(color: Colors.white54, fontWeight: FontWeight.w700)),
-                  ],
+                  children: List<Widget>.generate(tabLabels.length, (idx) {
+                    final selected = idx == _activeRecorderTabIndex;
+                    return Expanded(
+                      child: InkWell(
+                        onTap: () => setState(() => _activeRecorderTabIndex = idx),
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Column(
+                            children: [
+                              Text(
+                                tabLabels[idx],
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  color: selected ? Colors.white : Colors.white54,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              AnimatedContainer(
+                                duration: const Duration(milliseconds: 180),
+                                height: 3,
+                                width: selected ? 34 : 0,
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
                 ),
                 const SizedBox(height: 18),
                 SizedBox(
@@ -8395,28 +8421,12 @@ class _SleepRecorderFlowPageState extends State<SleepRecorderFlowPage> {
                   child: ListView(
                     scrollDirection: Axis.horizontal,
                     physics: const BouncingScrollPhysics(),
-                    children: [
-                      _recorderCurrentSelectionCard(
-                        title: track?.title ?? 'Current Selection',
-                        subtitle: 'Mix',
-                        duration: state.currentDuration,
-                        position: state.currentPosition,
-                        timerText: timerText,
-                        isPlaying: state.isPlaying,
-                        onToggle: () async => state.togglePlayPause(),
-                        onFavorite: () async {
-                          if (track != null) {
-                            await state.toggleFavoriteTrack(track);
-                          }
-                        },
-                      ),
-                      ...savedMixes.map(
-                        (item) => Padding(
-                          padding: const EdgeInsets.only(left: 12),
-                          child: _recorderMiniMixCard(item: item),
-                        ),
-                      ),
-                    ],
+                    children: _recorderTabCards(
+                      context,
+                      state: state,
+                      currentTrack: track,
+                      timerText: timerText,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 22),
@@ -8569,6 +8579,155 @@ class _SleepRecorderFlowPageState extends State<SleepRecorderFlowPage> {
           Text(item.subtitle ?? 'Mix', style: const TextStyle(color: Colors.white70)),
           const Spacer(),
           const Icon(Icons.timer_outlined, color: Colors.white54),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _recorderTabCards(
+    BuildContext context, {
+    required SleepWellState state,
+    required SleepTrack? currentTrack,
+    required String? timerText,
+  }) {
+    switch (_activeRecorderTabIndex) {
+      case 0:
+        final recentTracks = <SleepTrack>[
+          if (currentTrack != null) currentTrack,
+          ...state.tracks.where((item) => currentTrack == null || item.title != currentTrack.title).take(3),
+        ];
+        return [
+          if (currentTrack != null)
+            _recorderCurrentSelectionCard(
+              title: currentTrack.title,
+              subtitle: 'Mix',
+              duration: state.currentDuration,
+              position: state.currentPosition,
+              timerText: timerText,
+              isPlaying: state.isPlaying,
+              onToggle: () async => state.togglePlayPause(),
+              onFavorite: () async {
+                await state.toggleFavoriteTrack(currentTrack);
+              },
+            ),
+          ...recentTracks.skip(currentTrack == null ? 0 : 1).map(
+                (item) => Padding(
+                  padding: const EdgeInsets.only(left: 12),
+                  child: _recorderTrackCard(
+                    track: item,
+                    subtitle: item.displaySubtitle,
+                    onTap: () async => state.playTrack(item),
+                  ),
+                ),
+              ),
+        ];
+      case 1:
+        final favorites = state.tracks.where(state.isFavoriteTrack).toList();
+        if (favorites.isEmpty) {
+          return <Widget>[_recorderEmptyCard('No favorites yet', 'Favorite a track to see it here.')];
+        }
+        return favorites.take(4).map((item) {
+          return Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: _recorderTrackCard(
+              track: item,
+              subtitle: item.displaySubtitle,
+              onTap: () async => state.playTrack(item),
+            ),
+          );
+        }).toList();
+      case 2:
+        final recommended = state.tracks
+            .where((item) => currentTrack == null || item.title != currentTrack.title)
+            .take(4)
+            .toList();
+        return recommended.map((item) {
+          return Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: _recorderTrackCard(
+              track: item,
+              subtitle: item.displaySubtitle,
+              onTap: () async => state.playTrack(item),
+            ),
+          );
+        }).toList();
+      case 3:
+      default:
+        final mixes = state.savedMixItems.take(4).toList();
+        if (mixes.isEmpty) {
+          return <Widget>[_recorderEmptyCard('No mixes yet', 'Save a mix and it will show up here.')];
+        }
+        return mixes.map((item) {
+          return Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(18),
+              onTap: () async => state.playSavedMix(item),
+              child: _recorderMiniMixCard(item: item),
+            ),
+          );
+        }).toList();
+    }
+  }
+
+  Widget _recorderTrackCard({
+    required SleepTrack track,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: onTap,
+      child: Container(
+        width: 156,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          color: Colors.white.withValues(alpha: 0.05),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const CircleAvatar(
+              backgroundColor: Colors.white12,
+              child: Icon(Icons.music_note_rounded),
+            ),
+            const Spacer(),
+            Text(
+              track.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white70),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _recorderEmptyCard(String title, String body) {
+    return Container(
+      width: 232,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: Colors.white.withValues(alpha: 0.05),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.nights_stay_rounded, size: 30, color: Colors.white70),
+          const Spacer(),
+          Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 8),
+          Text(body, style: const TextStyle(color: Colors.white70)),
         ],
       ),
     );
