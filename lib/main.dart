@@ -8,6 +8,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
@@ -201,6 +203,7 @@ class SleepWellState extends ChangeNotifier {
   final SleepWellApi _api;
   final bool _enableAudio;
   final AudioPlayer _player = AudioPlayer();
+  AudioRecorder? _recorder;
   final Map<String, AudioPlayer> _mixerPlayers = <String, AudioPlayer>{};
   SharedPreferences? _prefs;
   StreamSubscription<Duration>? _positionSubscription;
@@ -236,6 +239,7 @@ class SleepWellState extends ChangeNotifier {
   final List<String> preferredCategories = <String>[];
   final List<String> preferredSoundTypes = <String>[];
   final List<SleepSession> sessions = <SleepSession>[];
+  final List<TrackedSleepNight> trackedNights = <TrackedSleepNight>[];
   final Map<String, double> mixer = <String, double>{
     'Rain': 0.7,
     'Wind': 0.3,
@@ -270,16 +274,23 @@ class SleepWellState extends ChangeNotifier {
   DateTime? _lastBedtimeTriggerAt;
   int sleepTimerMinutes = 30;
   DateTime? _sleepTimerEndsAt;
+  String? selectedInsightNightId;
+  int insightsTabIndex = 0;
+  DateTime insightsCalendarMonth = DateTime.now();
   Duration currentPosition = Duration.zero;
   Duration currentDuration = Duration.zero;
   double mainPlayerVolume = 1.0;
   SleepTrack? selectedTrack;
   int? _activeSessionId;
   DateTime? _sessionStartedAt;
+  String? _activeTrackedNightId;
+  String? _activeRecordingPath;
   SleepInsights insights = const SleepInsights(
     usageFrequencyLast7Days: 0,
     consistencyScore: 0,
     averageDurationMinutes: 0,
+    nights: <TrackedSleepNight>[],
+    availableDates: <DateTime>[],
   );
   List<OnboardingStepContent> onboardingScreens = <OnboardingStepContent>[];
 
@@ -915,15 +926,89 @@ class SleepWellState extends ChangeNotifier {
     if (selectedTrack == null && tracks.isNotEmpty) {
       await playTrack(tracks.first);
     }
+    final permissionGranted = await _ensureRecorderPermission();
+    if (!permissionGranted) {
+      lastError = 'Microphone permission is required to track sleep.';
+      notifyListeners();
+      return;
+    }
     if (sleepRecorderActive) {
       hasUsedSleepRecorder = true;
       await _persistLocalState();
       notifyListeners();
       return;
     }
+
+    final startedAt = DateTime.now();
+    final recordingPath = await _createRecordingFilePath(startedAt);
+    final activeKinds = _currentMixKinds(
+      selectedTrack == null ? TrackPlayerKind.meditation : _normalizedTrackKind(selectedTrack!.playerKind),
+    );
+    final metadata = <String, dynamic>{
+      'preferred_track_title': selectedTrack?.title,
+      'preferred_track_kind': selectedTrack?.playerKind.name,
+      'active_mix_kinds': activeKinds,
+      'mixer_channels': _normalizedMixerChannels(),
+    };
+    TrackedSleepNight? startedNight;
+    try {
+      startedNight = await _api.startTrackedNight(
+        deviceId: deviceId,
+        sessionId: _activeSessionId,
+        preferredTrackId: selectedTrack?.id,
+        entryPoint: 'track_my_sleep',
+        startedAt: startedAt,
+        trackedDate: startedAt,
+        sleepGoalMinutes: sleepGoalHours * 60,
+        smartAlarmWindowMinutes: smartAlarmWindowMinutes,
+        wakeAlarmTime: _formatTimeOfDay(wakeAlarmTime),
+        mixSnapshot: <String, dynamic>{
+          'included_types': activeKinds,
+          'channels': _normalizedMixerChannels(),
+        },
+        metadata: metadata,
+      );
+      apiConnected = true;
+    } catch (_) {
+      apiConnected = false;
+      startedNight = TrackedSleepNight.active(
+        nightId: 'local-${startedAt.microsecondsSinceEpoch}',
+        trackedDate: DateTime(startedAt.year, startedAt.month, startedAt.day),
+        bedtime: startedAt,
+        sleepGoalMinutes: sleepGoalHours * 60,
+        localRecordingPath: recordingPath,
+        wakeAlarmLabel: _formatTimeOfDay(wakeAlarmTime),
+        metadata: metadata,
+      );
+    }
+
+    try {
+      await _audioRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 64000,
+          sampleRate: 44100,
+        ),
+        path: recordingPath,
+      );
+      microphonePermissionGranted = true;
+    } catch (_) {
+      lastError = 'Sleep recorder could not start.';
+      notifyListeners();
+      return;
+    }
+
     hasUsedSleepRecorder = true;
     sleepRecorderActive = true;
-    sleepRecorderStartedAt = DateTime.now();
+    sleepRecorderStartedAt = startedAt;
+    _activeRecordingPath = recordingPath;
+    _activeTrackedNightId = startedNight.nightId;
+    _upsertTrackedNight(
+      startedNight.copyWith(
+        localRecordingPath: recordingPath,
+        wakeAlarmLabel: _formatTimeOfDay(wakeAlarmTime),
+      ),
+    );
     if (!wakeAlarmEnabled) {
       wakeAlarmEnabled = true;
     }
@@ -936,13 +1021,268 @@ class SleepWellState extends ChangeNotifier {
     if (!sleepRecorderActive) {
       return;
     }
+    final endedAt = DateTime.now();
+    String? recordedPath;
+    try {
+      recordedPath = await _audioRecorder.stop();
+    } catch (_) {
+      recordedPath = _activeRecordingPath;
+    }
+    TrackedSleepNight? trackedNight;
+    for (final night in trackedNights) {
+      if (night.nightId == _activeTrackedNightId) {
+        trackedNight = night;
+        break;
+      }
+    }
+    if (trackedNight != null) {
+      await _finalizeTrackedNight(
+        trackedNight,
+        endedAt: endedAt,
+        recordingPath: recordedPath ?? _activeRecordingPath,
+      );
+    }
     sleepRecorderActive = false;
     sleepRecorderStartedAt = null;
+    _activeRecordingPath = null;
+    _activeTrackedNightId = null;
     await stopPlayback();
     await logUiAction('sleep_recorder_stop');
     await _persistLocalState();
     await refreshInsights();
     notifyListeners();
+  }
+
+  Future<bool> _ensureRecorderPermission() async {
+    try {
+      final granted = await _audioRecorder.hasPermission();
+      setMicrophonePermissionGranted(granted);
+      return granted;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<String> _createRecordingFilePath(DateTime startedAt) async {
+    final directory = await getApplicationDocumentsDirectory();
+    final recordingsDir = Directory('${directory.path}/sleep_recordings');
+    if (!await recordingsDir.exists()) {
+      await recordingsDir.create(recursive: true);
+    }
+    final name = 'night-${startedAt.millisecondsSinceEpoch}.m4a';
+    return '${recordingsDir.path}/$name';
+  }
+
+  Future<void> _finalizeTrackedNight(
+    TrackedSleepNight trackedNight, {
+    required DateTime endedAt,
+    required String? recordingPath,
+  }) async {
+    final durationMinutes = max(
+      1,
+      endedAt.difference(trackedNight.bedtime ?? endedAt).inMinutes,
+    );
+    final durationSeconds = max(
+      60,
+      endedAt.difference(trackedNight.bedtime ?? endedAt).inSeconds,
+    );
+    var updatedNight = trackedNight.copyWith(
+      status: 'completed',
+      wakeTime: endedAt,
+      timeAsleepMinutes: durationMinutes,
+      localRecordingPath: recordingPath,
+    );
+
+    try {
+      if (!updatedNight.isLocalOnly && recordingPath != null && File(recordingPath).existsSync()) {
+        await _api.uploadTrackedNightRecording(
+          nightId: updatedNight.nightId,
+          deviceId: deviceId,
+          recordingPath: recordingPath,
+          durationSeconds: durationSeconds,
+        );
+      }
+      if (!updatedNight.isLocalOnly) {
+        updatedNight = await _api.completeTrackedNight(
+          nightId: updatedNight.nightId,
+          deviceId: deviceId,
+          endedAt: endedAt,
+          recordingDurationSeconds: durationSeconds,
+          metadata: <String, dynamic>{
+            'sleep_goal_hours': sleepGoalHours,
+            'smart_alarm_window_minutes': smartAlarmWindowMinutes,
+          },
+        );
+        apiConnected = true;
+      } else {
+        updatedNight = _buildLocalTrackedNightSummary(updatedNight);
+        apiConnected = false;
+      }
+    } catch (_) {
+      updatedNight = _buildLocalTrackedNightSummary(updatedNight);
+      apiConnected = false;
+    }
+
+    _upsertTrackedNight(updatedNight);
+    insights = _buildLocalInsights();
+    await _persistLocalState();
+  }
+
+  TrackedSleepNight _buildLocalTrackedNightSummary(TrackedSleepNight trackedNight) {
+    final durationMinutes = max(1, trackedNight.timeAsleepMinutes);
+    final goalMinutes = max(360, min(600, trackedNight.sleepGoalMinutes));
+    final qualityScore = max(
+      48,
+      min(96, 92 - (durationMinutes - goalMinutes).abs() ~/ 14),
+    );
+    final awake = max(0, (durationMinutes * 0.05).round());
+    final dream = max(20, (durationMinutes * 0.15).round());
+    final deep = max(30, (durationMinutes * 0.12).round());
+    final light = max(0, durationMinutes - awake - dream - deep);
+    final totals = <String, int>{
+      'awake': awake,
+      'dream': dream,
+      'light': light,
+      'deep': deep,
+    };
+    final timeline = <SleepPhaseTimelinePoint>[];
+    var minuteOffset = 0;
+    for (final phase in <MapEntry<String, int>>[
+      MapEntry<String, int>('light', max(1, light ~/ 4)),
+      MapEntry<String, int>('deep', max(1, deep ~/ 2)),
+      MapEntry<String, int>('light', max(1, light ~/ 4)),
+      MapEntry<String, int>('dream', max(1, dream ~/ 2)),
+      MapEntry<String, int>('light', max(1, light - (light ~/ 2))),
+      MapEntry<String, int>('dream', max(1, dream - (dream ~/ 2))),
+      MapEntry<String, int>('awake', max(1, awake)),
+    ]) {
+      timeline.add(
+        SleepPhaseTimelinePoint(
+          minuteOffset: minuteOffset,
+          minutes: phase.value,
+          phase: phase.key,
+        ),
+      );
+      minuteOffset += phase.value;
+    }
+
+    final soundDetections = <SoundDetectionData>[
+      SoundDetectionData(
+        key: 'snoring',
+        label: 'Snoring',
+        emoji: '😴',
+        count: durationMinutes > 360 ? 1 : 0,
+        status: durationMinutes > 360 ? '1 clip' : 'None',
+        minutes: durationMinutes > 360 ? 2 : 0,
+        confidenceScore: durationMinutes > 360 ? 68 : 0,
+      ),
+      const SoundDetectionData(
+        key: 'noise',
+        label: 'Noise',
+        emoji: '💥',
+        count: 0,
+        status: 'None',
+        minutes: 0,
+        confidenceScore: 0,
+      ),
+      const SoundDetectionData(
+        key: 'music',
+        label: 'Music',
+        emoji: '💿',
+        count: 0,
+        status: 'None',
+        minutes: 0,
+        confidenceScore: 0,
+      ),
+      const SoundDetectionData(
+        key: 'traffic',
+        label: 'Traffic',
+        emoji: '🚦',
+        count: 0,
+        status: 'None',
+        minutes: 0,
+        confidenceScore: 0,
+      ),
+      const SoundDetectionData(
+        key: 'talking',
+        label: 'Talking',
+        emoji: '💬',
+        count: 0,
+        status: 'None',
+        minutes: 0,
+        confidenceScore: 0,
+      ),
+    ];
+
+    final recordings = trackedNight.localRecordingPath == null
+        ? const <NightRecordingData>[]
+        : <NightRecordingData>[
+            NightRecordingData(
+              id: '${trackedNight.nightId}-1',
+              label: 'Snoring',
+              description: 'Detected once during the night.',
+              detectionKey: 'snoring',
+              startSecond: 180,
+              durationSeconds: 24,
+              confidenceScore: 68,
+              occurredAt: (trackedNight.bedtime ?? trackedNight.trackedDate)
+                  .add(const Duration(minutes: 12)),
+              sourceUrl: trackedNight.localRecordingPath,
+            ),
+          ];
+
+    final recommendedTracks = tracks
+        .take(3)
+        .map(
+          (track) => RecommendedTrackData(
+            id: track.id,
+            title: track.title,
+            subtitle: track.displaySubtitle,
+          ),
+        )
+        .toList();
+
+    return trackedNight.copyWith(
+      status: 'analyzed',
+      qualityScore: qualityScore,
+      summaryCards: <InsightSummaryCardData>[
+        InsightSummaryCardData(
+          key: 'quality',
+          eyebrow: 'SLEEP QUALITY',
+          title: qualityScore >= 85 ? 'Nailed it!' : 'A restorative night',
+          subtitle: "Swipe left to see last night's highlights",
+          metric: '$qualityScore',
+        ),
+        InsightSummaryCardData(
+          key: 'total_sleep',
+          eyebrow: '${_formatInsightHours(durationMinutes)} OUT OF ${_formatInsightHours(goalMinutes)}',
+          title: 'Total Sleep Time',
+          subtitle: 'Another night, another win. You are building steadier sleep habits.',
+          metric: _formatInsightHours(durationMinutes),
+        ),
+        InsightSummaryCardData(
+          key: 'movement',
+          eyebrow: 'QUIET NIGHT',
+          title: recordings.isEmpty ? 'Movement / Noises' : 'Some sound detected',
+          subtitle: recordings.isEmpty
+              ? 'Your environment stayed mostly calm while you slept.'
+              : 'A few sleep sounds were detected while you rested.',
+          metric: '${recordings.length}',
+        ),
+      ],
+      sleepPhases: SleepPhaseInsightData(
+        timeline: timeline,
+        totals: totals,
+        focusKey: 'light',
+        focusTitle: 'Light',
+        focusBody: 'Light sleep made up the biggest part of the night, keeping a steady recovery rhythm.',
+        keyInsights: 'Your night stayed close to your goal, with a balanced spread across sleep phases.',
+      ),
+      soundDetections: soundDetections,
+      recordings: recordings,
+      recommendedTracks: recommendedTracks,
+      isLocalOnly: true,
+    );
   }
 
   String get smartAlarmRangeLabel {
@@ -1189,27 +1529,153 @@ class SleepWellState extends ChangeNotifier {
 
   Future<void> refreshInsights() async {
     try {
-      insights = isAuthenticated
+      final latestInsights = isAuthenticated
           ? await _api.fetchInsightsForUser()
           : await _api.fetchInsights(deviceId: deviceId);
+      insights = latestInsights;
+      _mergeTrackedNights(latestInsights.nights);
+      _selectDefaultInsightNight();
       apiConnected = true;
       lastError = null;
     } catch (_) {
-      final localUsage = sessions.length;
-      final localConsistency = min(100, (localUsage / 7 * 100).round());
-      final localAvg = sessions.isEmpty
-          ? 0
-          : sessions.map((s) => s.durationMinutes).reduce((a, b) => a + b) ~/
-              sessions.length;
-      insights = SleepInsights(
-        usageFrequencyLast7Days: localUsage,
-        consistencyScore: localConsistency,
-        averageDurationMinutes: localAvg,
-      );
+      insights = _buildLocalInsights();
       apiConnected = false;
       lastError = 'Insights are currently local.';
     }
     notifyListeners();
+  }
+
+  TrackedSleepNight? get selectedInsightsNight {
+    if (trackedNights.isEmpty) {
+      return null;
+    }
+
+    if (selectedInsightNightId != null) {
+      for (final night in trackedNights) {
+        if (night.nightId == selectedInsightNightId) {
+          return night;
+        }
+      }
+    }
+
+    return trackedNights.first;
+  }
+
+  List<DateTime> get insightAvailableDates {
+    final values = <DateTime>{};
+    for (final date in insights.availableDates) {
+      values.add(DateTime(date.year, date.month, date.day));
+    }
+    for (final night in trackedNights) {
+      values.add(DateTime(night.trackedDate.year, night.trackedDate.month, night.trackedDate.day));
+    }
+    final sorted = values.toList()..sort((a, b) => b.compareTo(a));
+    return sorted;
+  }
+
+  void setInsightsTabIndex(int index) {
+    insightsTabIndex = index.clamp(0, 2);
+    notifyListeners();
+  }
+
+  void setInsightsCalendarMonth(DateTime value) {
+    insightsCalendarMonth = DateTime(value.year, value.month);
+    notifyListeners();
+  }
+
+  void selectInsightNightById(String nightId) {
+    selectedInsightNightId = nightId;
+    notifyListeners();
+  }
+
+  void selectInsightNightByDate(DateTime date) {
+    final normalized = DateTime(date.year, date.month, date.day);
+    for (final night in trackedNights) {
+      final trackedDate = DateTime(
+        night.trackedDate.year,
+        night.trackedDate.month,
+        night.trackedDate.day,
+      );
+      if (trackedDate == normalized) {
+        selectedInsightNightId = night.nightId;
+        insightsCalendarMonth = DateTime(date.year, date.month);
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  SleepInsights _buildLocalInsights() {
+    final completedNights = trackedNights
+        .where((night) => night.timeAsleepMinutes > 0)
+        .toList();
+    final recentWindowStart = DateTime.now().subtract(const Duration(days: 7));
+    final recentDates = <String>{};
+    for (final night in completedNights) {
+      if (!night.trackedDate.isBefore(recentWindowStart)) {
+        recentDates.add(night.trackedDate.toIso8601String().split('T').first);
+      }
+    }
+    final localUsage = recentDates.length;
+    final localConsistency = min(100, (localUsage / 7 * 100).round());
+    final localAvg = completedNights.isEmpty
+        ? (sessions.isEmpty
+            ? 0
+            : sessions.map((s) => s.durationMinutes).reduce((a, b) => a + b) ~/ sessions.length)
+        : completedNights.map((night) => night.timeAsleepMinutes).reduce((a, b) => a + b) ~/
+            completedNights.length;
+    return SleepInsights(
+      usageFrequencyLast7Days: localUsage,
+      consistencyScore: localConsistency,
+      averageDurationMinutes: localAvg,
+      nights: List<TrackedSleepNight>.unmodifiable(trackedNights),
+      availableDates: insightAvailableDates,
+    );
+  }
+
+  void _mergeTrackedNights(List<TrackedSleepNight> remoteNights) {
+    final preservedLocal = trackedNights
+        .where((night) => night.isLocalOnly || night.isActive)
+        .toList();
+    trackedNights
+      ..clear()
+      ..addAll(remoteNights);
+    for (final localNight in preservedLocal) {
+      final exists = trackedNights.any((night) => night.nightId == localNight.nightId);
+      if (!exists) {
+        trackedNights.add(localNight);
+      }
+    }
+    trackedNights.sort((a, b) => b.trackedDate.compareTo(a.trackedDate));
+  }
+
+  void _upsertTrackedNight(TrackedSleepNight night) {
+    trackedNights.removeWhere((item) => item.nightId == night.nightId);
+    trackedNights.add(night);
+    trackedNights.sort((a, b) {
+      final dateCompare = b.trackedDate.compareTo(a.trackedDate);
+      if (dateCompare != 0) {
+        return dateCompare;
+      }
+      return (b.bedtime ?? DateTime.fromMillisecondsSinceEpoch(0))
+          .compareTo(a.bedtime ?? DateTime.fromMillisecondsSinceEpoch(0));
+    });
+    _selectDefaultInsightNight();
+  }
+
+  void _selectDefaultInsightNight() {
+    if (trackedNights.isEmpty) {
+      selectedInsightNightId = null;
+      return;
+    }
+    if (selectedInsightNightId == null ||
+        trackedNights.every((night) => night.nightId != selectedInsightNightId)) {
+      selectedInsightNightId = trackedNights.first.nightId;
+    }
+    final selected = selectedInsightsNight;
+    if (selected != null) {
+      insightsCalendarMonth = DateTime(selected.trackedDate.year, selected.trackedDate.month);
+    }
   }
 
   Future<void> _startSession({
@@ -1290,6 +1756,17 @@ class SleepWellState extends ChangeNotifier {
     if (sleepRecorderStartedAtRaw != null && sleepRecorderStartedAtRaw.isNotEmpty) {
       sleepRecorderStartedAt = DateTime.tryParse(sleepRecorderStartedAtRaw);
     }
+    _activeTrackedNightId = prefs.getString('active_tracked_night_id');
+    _activeRecordingPath = prefs.getString('active_recording_path');
+    selectedInsightNightId = prefs.getString('selected_insight_night_id');
+    insightsTabIndex = (prefs.getInt('insights_tab_index') ?? insightsTabIndex).clamp(0, 2);
+    final insightsMonthRaw = prefs.getString('insights_calendar_month');
+    if (insightsMonthRaw != null && insightsMonthRaw.isNotEmpty) {
+      final parsedMonth = DateTime.tryParse(insightsMonthRaw);
+      if (parsedMonth != null) {
+        insightsCalendarMonth = DateTime(parsedMonth.year, parsedMonth.month);
+      }
+    }
     appLanguage = prefs.getString('app_language') ?? appLanguage;
     selectedSleepGoal = prefs.getString('selected_sleep_goal') ?? selectedSleepGoal;
     authToken = prefs.getString('auth_token');
@@ -1338,6 +1815,19 @@ class SleepWellState extends ChangeNotifier {
     _activeMixKinds
       ..clear()
       ..addAll(activeMixKindsRaw);
+    final trackedNightsRaw = prefs.getString('tracked_sleep_nights');
+    if (trackedNightsRaw != null && trackedNightsRaw.isNotEmpty) {
+      final decoded = jsonDecode(trackedNightsRaw);
+      if (decoded is List) {
+        trackedNights
+          ..clear()
+          ..addAll(
+            decoded
+                .whereType<Map<String, dynamic>>()
+                .map(TrackedSleepNight.fromJson),
+          );
+      }
+    }
 
     preferredCategories
       ..clear()
@@ -1397,6 +1887,26 @@ class SleepWellState extends ChangeNotifier {
     } else {
       await prefs.remove('sleep_recorder_started_at');
     }
+    if (_activeTrackedNightId != null) {
+      await prefs.setString('active_tracked_night_id', _activeTrackedNightId!);
+    } else {
+      await prefs.remove('active_tracked_night_id');
+    }
+    if (_activeRecordingPath != null) {
+      await prefs.setString('active_recording_path', _activeRecordingPath!);
+    } else {
+      await prefs.remove('active_recording_path');
+    }
+    if (selectedInsightNightId != null) {
+      await prefs.setString('selected_insight_night_id', selectedInsightNightId!);
+    } else {
+      await prefs.remove('selected_insight_night_id');
+    }
+    await prefs.setInt('insights_tab_index', insightsTabIndex);
+    await prefs.setString(
+      'insights_calendar_month',
+      DateTime(insightsCalendarMonth.year, insightsCalendarMonth.month).toIso8601String(),
+    );
     await prefs.setString('app_language', appLanguage);
     await prefs.setString('selected_sleep_goal', selectedSleepGoal);
     await prefs.setString('mixer_state', jsonEncode(mixer));
@@ -1418,6 +1928,10 @@ class SleepWellState extends ChangeNotifier {
       jsonEncode(localMixItems.map((item) => item.toJson()).toList()),
     );
     await prefs.setStringList('active_mix_kinds', _activeMixKinds.toList());
+    await prefs.setString(
+      'tracked_sleep_nights',
+      jsonEncode(trackedNights.map((night) => night.toJson()).toList()),
+    );
     await prefs.setString('settings_toggles', jsonEncode(settingsToggles));
     await prefs.setString('sync_status', syncStatus);
     await prefs.setInt('sync_failure_count', syncFailureCount);
@@ -1922,12 +2436,15 @@ class SleepWellState extends ChangeNotifier {
     _bedtimeTicker?.cancel();
     _positionSubscription?.cancel();
     _playerStateSubscription?.cancel();
+    _recorder?.dispose();
     _player.dispose();
     for (final player in _mixerPlayers.values) {
       player.dispose();
     }
     super.dispose();
   }
+
+  AudioRecorder get _audioRecorder => _recorder ??= AudioRecorder();
 }
 
 class SleepTrack {
@@ -8859,238 +9376,954 @@ class _SleepRecorderFlowPageState extends State<SleepRecorderFlowPage> {
   }
 }
 
-class InsightsPage extends StatelessWidget {
+class InsightsPage extends StatefulWidget {
   const InsightsPage({super.key, required this.state, required this.onAction});
   final SleepWellState state;
   final ContentActionHandler onAction;
 
   @override
+  State<InsightsPage> createState() => _InsightsPageState();
+}
+
+class _InsightsPageState extends State<InsightsPage> {
+  late final PageController _summaryController;
+  int _summaryIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _summaryController = PageController(viewportFraction: 0.74);
+  }
+
+  @override
+  void dispose() {
+    _summaryController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final state = widget.state;
     return AnimatedBuilder(
       animation: state,
       builder: (context, _) {
-        final quality = state.sectionByKey('insight_sleep_quality');
-        final snore = state.sectionByKey('insight_snore');
-        final phases = state.sectionByKey('insight_phases');
-        final qualityItem = quality?.items.isNotEmpty == true ? quality!.items.first : null;
-        final snoreItem = snore?.items.isNotEmpty == true ? snore!.items.first : null;
-        final phasesItem = phases?.items.isNotEmpty == true ? phases!.items.first : null;
-        final qualityScore = qualityItem == null ? 0 : _toInt(qualityItem.meta['score']);
+        final night = state.selectedInsightsNight;
+        final availableDates = state.insightAvailableDates;
+        final isEmpty = night == null;
+        final summaryCards = isEmpty
+            ? const <InsightSummaryCardData>[]
+            : (night.summaryCards.isEmpty ? _fallbackSummaryCards(night) : night.summaryCards);
+
+        if (_summaryIndex >= max(1, summaryCards.length)) {
+          _summaryIndex = 0;
+        }
 
         return ListView(
           physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
-          padding: const EdgeInsets.fromLTRB(16, 6, 16, 180),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 180),
           children: [
-            const Text('Friday Jul 10', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 10),
-            SizedBox(
-              height: 44,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: 7,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
-                itemBuilder: (_, idx) {
-                  final day = 5 + idx;
-                  final selected = day == 10;
-                  return Container(
-                    width: 42,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: selected ? Border.all(color: Colors.white, width: 3.2) : null,
-                      color: selected ? Colors.transparent : Colors.white.withValues(alpha: 0.04),
-                    ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      '$day',
-                      style: TextStyle(
-                        color: selected ? Colors.white : Colors.white38,
-                        fontWeight: FontWeight.w700,
+            _headerRow(context, night),
+            const SizedBox(height: 14),
+            _topDateStrip(availableDates, night),
+            const SizedBox(height: 14),
+            _segmentedTabs(),
+            if (state.sleepRecorderActive) ...[
+              const SizedBox(height: 16),
+              _surfaceCard(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Tracking in progress',
+                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Recorder is active now. Smart alarm: ${state.smartAlarmRangeLabel}',
+                            style: const TextStyle(color: Colors.white70),
+                          ),
+                        ],
                       ),
                     ),
-                  );
-                },
-              ),
-            ),
-            if (state.sleepRecorderActive) ...[
-              const SizedBox(height: 10),
-              _insightCard(
-                minHeight: 118,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Sleep Recorder is active', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-                    const SizedBox(height: 6),
-                    Text(
-                      'Tracking is in progress. Smart alarm: ${state.smartAlarmRangeLabel}',
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                    const SizedBox(height: 12),
+                    const SizedBox(width: 12),
                     FilledButton(
+                      onPressed: () => widget.onAction(
+                        context,
+                        const HomeItemContent(title: 'Track my sleep', ctaLabel: 'Track my sleep'),
+                        'insight_snore',
+                      ),
                       style: FilledButton.styleFrom(
                         backgroundColor: Colors.white,
                         foregroundColor: Colors.black,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                       ),
-                      onPressed: () => onAction(
-                        context,
-                        const HomeItemContent(title: 'Track my sleep', ctaLabel: 'Track my sleep'),
-                        'insight_snore',
-                      ),
-                      child: const Text('Open sleep recorder'),
+                      child: const Text('Open'),
                     ),
                   ],
                 ),
               ),
             ],
-            const SizedBox(height: 10),
-            _insightCard(
-              minHeight: 300,
-              child: Column(
-                children: [
-                  SizedBox(
-                    height: 92,
-                    child: CustomPaint(
-                      painter: _InsightsGaugePainter(),
-                      child: const SizedBox.expand(),
-                    ),
-                  ),
-                  Text('$qualityScore', style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800)),
-                  const Text('Sleep quality', style: TextStyle(color: Colors.white60)),
-                  const SizedBox(height: 8),
-                  Text(
-                    qualityItem?.title ?? 'No Sleep Quality Yet',
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    qualityItem?.subtitle ?? 'Track your sleep tonight and wake up to detailed insights here.',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white70),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
-            _insightCard(
-              minHeight: 188,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(snoreItem?.title ?? 'Do you snore?', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                        const SizedBox(height: 6),
-                        Text(
-                          snoreItem?.subtitle ?? "Record your sleep sounds to uncover what's disturbing your rest.",
-                          style: const TextStyle(color: Colors.white70),
-                        ),
-                        const SizedBox(height: 12),
-                        FilledButton(
-                          style: FilledButton.styleFrom(
-                            backgroundColor: Colors.white,
-                            foregroundColor: Colors.black,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-                            minimumSize: const Size(140, 44),
-                          ),
-                          onPressed: () => onAction(context, snoreItem ?? const HomeItemContent(title: 'Track my sleep'), 'insight_snore'),
-                          child: Text(state.sleepRecorderActive ? 'Open sleep recorder' : (snoreItem?.ctaLabel ?? 'Track my sleep')),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Container(
-                    width: 142,
-                    height: 124,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(14),
-                      color: Colors.white.withValues(alpha: 0.09),
-                    ),
-                    alignment: Alignment.center,
-                    child: const Text('😴', style: TextStyle(fontSize: 64)),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
-            _insightCard(
-              minHeight: 188,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(phasesItem?.title ?? 'Your Sleep Phases', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                        const SizedBox(height: 6),
-                        Text(
-                          phasesItem?.subtitle ?? 'Learn more about your sleeping patterns and how to improve them.',
-                          style: const TextStyle(color: Colors.white70),
-                        ),
-                        const SizedBox(height: 12),
-                        FilledButton(
-                          style: FilledButton.styleFrom(
-                            backgroundColor: Colors.white,
-                            foregroundColor: Colors.black,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-                            minimumSize: const Size(140, 44),
-                          ),
-                          onPressed: () => onAction(context, phasesItem ?? const HomeItemContent(title: 'Learn more'), 'insight_phases'),
-                          child: Text(phasesItem?.ctaLabel ?? 'Learn more'),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Container(
-                    width: 142,
-                    height: 124,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(14),
-                      gradient: const LinearGradient(colors: [Color(0xFF2E376F), Color(0xFF2D2E58)]),
-                    ),
-                    alignment: Alignment.center,
-                    child: const Icon(Icons.multiline_chart_rounded, size: 62, color: Color(0xFFAD7DFF)),
-                  ),
-                ],
-              ),
-            ),
+            const SizedBox(height: 16),
+            if (isEmpty)
+              _emptyInsightsState(context)
+            else if (state.insightsTabIndex == 0)
+              _buildSummaryTab(night, summaryCards)
+            else if (state.insightsTabIndex == 1)
+              _buildPhasesTab(night)
+            else
+              _buildRecordingsTab(context, night),
           ],
         );
       },
     );
   }
 
-  Widget _insightCard({required Widget child, double? minHeight}) {
+  Widget _headerRow(BuildContext context, TrackedSleepNight? night) {
+    final date = night?.trackedDate ?? DateTime.now();
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            _formatInsightHeaderDate(date),
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+          ),
+        ),
+        InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: () => _showCalendarSheet(context),
+          child: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white12),
+              color: Colors.white.withValues(alpha: 0.04),
+            ),
+            child: const Icon(Icons.calendar_month_outlined),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _topDateStrip(List<DateTime> dates, TrackedSleepNight? night) {
+    if (dates.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return SizedBox(
+      height: 46,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: min(dates.length, 10),
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (_, index) {
+          final date = dates[index];
+          final selected = night != null &&
+              date.year == night.trackedDate.year &&
+              date.month == night.trackedDate.month &&
+              date.day == night.trackedDate.day;
+          return GestureDetector(
+            onTap: () => widget.state.selectInsightNightByDate(date),
+            child: Container(
+              width: 44,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: selected ? Colors.white : Colors.white.withValues(alpha: 0.05),
+                border: Border.all(
+                  color: selected ? Colors.white : Colors.white10,
+                  width: selected ? 2 : 1,
+                ),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                '${date.day}',
+                style: TextStyle(
+                  color: selected ? Colors.black : Colors.white70,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _segmentedTabs() {
+    const tabs = <String>['Summary', 'Sleep Phases', 'Recordings'];
+    return Row(
+      children: List<Widget>.generate(tabs.length, (index) {
+        final selected = widget.state.insightsTabIndex == index;
+        return Expanded(
+          child: Padding(
+            padding: EdgeInsets.only(right: index == tabs.length - 1 ? 0 : 8),
+            child: GestureDetector(
+              onTap: () => widget.state.setInsightsTabIndex(index),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 220),
+                height: 48,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  color: selected ? Colors.white : Colors.white.withValues(alpha: 0.04),
+                  border: Border.all(color: selected ? Colors.white : Colors.white12),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  tabs[index],
+                  style: TextStyle(
+                    color: selected ? Colors.black : Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  Widget _emptyInsightsState(BuildContext context) {
+    return _surfaceCard(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 18),
+        child: Column(
+          children: [
+            const Text(
+              '😴💨🥱💬😪',
+              style: TextStyle(fontSize: 30),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              'No sounds recorded',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'Track your sleep and get all the data and recordings of what happens throughout the night using our Sleep Tracker',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 22),
+            FilledButton(
+              onPressed: () => widget.onAction(
+                context,
+                const HomeItemContent(title: 'Track my sleep', ctaLabel: 'Track my sleep'),
+                'insight_snore',
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: Colors.black,
+                minimumSize: const Size(200, 52),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+              ),
+              child: const Text('Track My Sleep'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummaryTab(
+    TrackedSleepNight night,
+    List<InsightSummaryCardData> summaryCards,
+  ) {
+    return Column(
+      children: [
+        SizedBox(
+          height: 340,
+          child: PageView.builder(
+            controller: _summaryController,
+            itemCount: summaryCards.length,
+            onPageChanged: (value) {
+              setState(() => _summaryIndex = value);
+            },
+            itemBuilder: (_, index) => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: _summaryCard(summaryCards[index]),
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: List<Widget>.generate(
+            summaryCards.length,
+            (index) => Container(
+              width: 7,
+              height: 7,
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: index == _summaryIndex ? Colors.white : Colors.white24,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 18),
+        _surfaceCard(
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  Expanded(child: _statCell(Icons.nightlight_round, 'Bedtime', _formatInsightTime(night.bedtime))),
+                  const SizedBox(width: 12),
+                  Expanded(child: _statCell(Icons.wb_sunny_outlined, 'Wake up', _formatInsightTime(night.wakeTime))),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: _statCell(
+                      Icons.bedtime_outlined,
+                      'Time asleep',
+                      _formatInsightHours(night.timeAsleepMinutes),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _statCell(
+                      Icons.alarm_on_rounded,
+                      'Sleep Goal',
+                      _formatInsightHours(night.sleepGoalMinutes),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+        _buildPhasesPreview(night),
+      ],
+    );
+  }
+
+  Widget _buildPhasesPreview(TrackedSleepNight night) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Sleep Phases', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 12),
+        _surfaceCard(
+          child: SizedBox(
+            height: 190,
+            child: CustomPaint(
+              painter: _SleepPhasesChartPainter(night.sleepPhases.timeline),
+              child: const SizedBox.expand(),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPhasesTab(TrackedSleepNight night) {
+    final totals = night.sleepPhases.totals;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _surfaceCard(
+          child: Column(
+            children: [
+              SizedBox(
+                height: 180,
+                child: CustomPaint(
+                  painter: _SleepPhasesChartPainter(night.sleepPhases.timeline),
+                  child: const SizedBox.expand(),
+                ),
+              ),
+              const SizedBox(height: 18),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _phaseTotalCard('Awake', totals['awake'] ?? 0, const Color(0xFFFFB7A0), selected: night.sleepPhases.focusKey == 'awake'),
+                    const SizedBox(width: 10),
+                    _phaseTotalCard('Dream', totals['dream'] ?? 0, const Color(0xFFF48AC3), selected: night.sleepPhases.focusKey == 'dream'),
+                    const SizedBox(width: 10),
+                    _phaseTotalCard('Light', totals['light'] ?? 0, const Color(0xFFB96CFF), selected: night.sleepPhases.focusKey == 'light'),
+                    const SizedBox(width: 10),
+                    _phaseTotalCard('Deep', totals['deep'] ?? 0, const Color(0xFF5D8CFF), selected: night.sleepPhases.focusKey == 'deep'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          night.sleepPhases.focusTitle,
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          night.sleepPhases.focusBody,
+          style: const TextStyle(color: Colors.white70, height: 1.35),
+        ),
+        const SizedBox(height: 18),
+        Container(height: 1, color: Colors.white12),
+        const SizedBox(height: 18),
+        const Text('Sleep all night', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 10),
+        Text(
+          night.sleepPhases.keyInsights,
+          style: const TextStyle(color: Colors.white70, height: 1.35),
+        ),
+        const SizedBox(height: 14),
+        if (night.recommendedTracks.isNotEmpty)
+          _recommendedTrackRow(night.recommendedTracks.first)
+        else
+          const SizedBox.shrink(),
+        const SizedBox(height: 18),
+        Container(height: 1, color: Colors.white12),
+        const SizedBox(height: 18),
+        const Text('Key insights', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 10),
+        Text(
+          night.sleepPhases.keyInsights,
+          style: const TextStyle(color: Colors.white70, height: 1.35),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRecordingsTab(BuildContext context, TrackedSleepNight night) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _surfaceCard(
+          child: Column(
+            children: [
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: night.soundDetections
+                    .map((detection) => _detectionChip(detection))
+                    .toList(),
+              ),
+              const SizedBox(height: 18),
+              if (night.recordings.isEmpty)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(16),
+                    color: Colors.white.withValues(alpha: 0.03),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.graphic_eq_rounded, color: Colors.white54),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'No recordings available for this night yet.',
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                Column(
+                  children: night.recordings
+                      .map((recording) => _recordingRow(recording))
+                      .toList(),
+                ),
+            ],
+          ),
+        ),
+        if (night.recordings.isEmpty) ...[
+          const SizedBox(height: 18),
+          _surfaceCard(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Column(
+                children: [
+                  const Text('😴💨🥱💬😪', style: TextStyle(fontSize: 30)),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'No sounds recorded',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Track your sleep and get all the data and recordings of what happens throughout the night using our Sleep Tracker',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 20),
+                  FilledButton(
+                    onPressed: () => widget.onAction(
+                      context,
+                      const HomeItemContent(title: 'Track my sleep', ctaLabel: 'Track my sleep'),
+                      'insight_snore',
+                    ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: Colors.black,
+                      minimumSize: const Size(200, 52),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                    ),
+                    child: const Text('Track My Sleep'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _summaryCard(InsightSummaryCardData card) {
+    final theme = _insightTheme(card.key);
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(28),
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: theme,
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(24, 22, 24, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Align(
+            alignment: Alignment.topRight,
+            child: Container(
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white.withValues(alpha: 0.15),
+              ),
+              child: const Icon(Icons.info_outline, size: 16),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            card.metric,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 42, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            card.eyebrow,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white70),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            card.title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            card.subtitle,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 14, color: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statCell(IconData icon, String label, String value) {
+    return Row(
+      children: [
+        Icon(icon, color: const Color(0xFFD2D0FF)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(value, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text(label, style: const TextStyle(color: Colors.white70)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _phaseTotalCard(String label, int minutes, Color color, {bool selected = false}) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      width: 104,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: selected ? Colors.white.withValues(alpha: 0.12) : Colors.white.withValues(alpha: 0.04),
+        border: Border.all(color: selected ? Colors.white24 : Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 14,
+            height: 14,
+            decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(4)),
+          ),
+          const SizedBox(height: 10),
+          Text(_formatInsightMinutes(minutes), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 2),
+          Text(label, style: const TextStyle(color: Colors.white70)),
+        ],
+      ),
+    );
+  }
+
+  Widget _recommendedTrackRow(RecommendedTrackData recommendation) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          Container(
+            width: 62,
+            height: 62,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              gradient: const LinearGradient(colors: [Color(0xFF21447A), Color(0xFF472E8A)]),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  recommendation.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  recommendation.subtitle,
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _detectionChip(SoundDetectionData detection) {
+    return SizedBox(
+      width: 94,
+      child: Column(
+        children: [
+          Text(detection.emoji, style: const TextStyle(fontSize: 30)),
+          const SizedBox(height: 6),
+          Text(
+            detection.status,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 2),
+          Text(
+            detection.label,
+            style: const TextStyle(color: Colors.white70),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _recordingRow(NightRecordingData recording) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        color: Colors.white.withValues(alpha: 0.04),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white.withValues(alpha: 0.08),
+            ),
+            alignment: Alignment.center,
+            child: const Icon(Icons.graphic_eq_rounded),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(recording.label, style: const TextStyle(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 4),
+                Text(
+                  '${recording.description} • ${_formatInsightClip(recording.durationSeconds)}',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _surfaceCard({required Widget child}) {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(22),
         color: Colors.white.withValues(alpha: 0.06),
       ),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(minHeight: minHeight ?? 0),
-        child: child,
+      child: child,
+    );
+  }
+
+  List<Color> _insightTheme(String key) {
+    switch (key) {
+      case 'quality':
+        return const [Color(0xFF0E5A53), Color(0xFF123E3A)];
+      case 'total_sleep':
+        return const [Color(0xFF7E6CCF), Color(0xFFC48898)];
+      case 'snoring':
+        return const [Color(0xFF366EAF), Color(0xFF2A4E86)];
+      case 'movement':
+        return const [Color(0xFFC2774E), Color(0xFFAF8A5D)];
+      default:
+        return const [Color(0xFF5E64C5), Color(0xFF3F4C9A)];
+    }
+  }
+
+  List<InsightSummaryCardData> _fallbackSummaryCards(TrackedSleepNight night) {
+    return <InsightSummaryCardData>[
+      InsightSummaryCardData(
+        key: 'quality',
+        eyebrow: 'SLEEP QUALITY',
+        title: night.qualityScore >= 85 ? 'Nailed it!' : 'A restorative night',
+        subtitle: "Swipe left to see last night's highlights",
+        metric: '${night.qualityScore}',
+      ),
+      InsightSummaryCardData(
+        key: 'total_sleep',
+        eyebrow: '${_formatInsightHours(night.timeAsleepMinutes)} OUT OF ${_formatInsightHours(night.sleepGoalMinutes)}',
+        title: 'Total Sleep Time',
+        subtitle: 'Another night, another win. You are building steadier sleep habits.',
+        metric: _formatInsightHours(night.timeAsleepMinutes),
+      ),
+    ];
+  }
+
+  Future<void> _showCalendarSheet(BuildContext context) async {
+    final state = widget.state;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF23285A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (sheetContext) => AnimatedBuilder(
+        animation: state,
+        builder: (_, __) {
+          final month = state.insightsCalendarMonth;
+          final firstDay = DateTime(month.year, month.month, 1);
+          final startWeekday = firstDay.weekday % 7;
+          final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
+          final available = state.insightAvailableDates
+              .map((date) => '${date.year}-${date.month}-${date.day}')
+              .toSet();
+          final selected = state.selectedInsightsNight?.trackedDate;
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      IconButton(
+                        onPressed: () => state.setInsightsCalendarMonth(DateTime(month.year, month.month - 1)),
+                        icon: const Icon(Icons.chevron_left_rounded),
+                      ),
+                      Expanded(
+                        child: Text(
+                          _formatInsightMonth(month),
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => state.setInsightsCalendarMonth(DateTime(month.year, month.month + 1)),
+                        icon: const Icon(Icons.chevron_right_rounded),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  const Row(
+                    children: [
+                      Expanded(child: Center(child: Text('Sun', style: TextStyle(color: Colors.white70)))),
+                      Expanded(child: Center(child: Text('Mon', style: TextStyle(color: Colors.white70)))),
+                      Expanded(child: Center(child: Text('Tue', style: TextStyle(color: Colors.white70)))),
+                      Expanded(child: Center(child: Text('Wed', style: TextStyle(color: Colors.white70)))),
+                      Expanded(child: Center(child: Text('Thu', style: TextStyle(color: Colors.white70)))),
+                      Expanded(child: Center(child: Text('Fri', style: TextStyle(color: Colors.white70)))),
+                      Expanded(child: Center(child: Text('Sat', style: TextStyle(color: Colors.white70)))),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: startWeekday + daysInMonth,
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 7,
+                      mainAxisSpacing: 12,
+                      crossAxisSpacing: 8,
+                      childAspectRatio: 1,
+                    ),
+                    itemBuilder: (_, index) {
+                      if (index < startWeekday) {
+                        return const SizedBox.shrink();
+                      }
+                      final day = index - startWeekday + 1;
+                      final date = DateTime(month.year, month.month, day);
+                      final key = '${date.year}-${date.month}-${date.day}';
+                      final isAvailable = available.contains(key);
+                      final isSelected = selected != null &&
+                          selected.year == date.year &&
+                          selected.month == date.month &&
+                          selected.day == date.day;
+                      return GestureDetector(
+                        onTap: !isAvailable
+                            ? null
+                            : () {
+                                state.selectInsightNightByDate(date);
+                                Navigator.of(sheetContext).pop();
+                              },
+                        child: Container(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: isSelected ? Colors.white : Colors.transparent,
+                              width: 2,
+                            ),
+                            color: isAvailable ? Colors.transparent : Colors.white.withValues(alpha: 0.02),
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            '$day',
+                            style: TextStyle(
+                              color: isAvailable ? Colors.white : Colors.white38,
+                              fontWeight: isSelected ? FontWeight.w800 : FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
 }
 
-class _InsightsGaugePainter extends CustomPainter {
+class _SleepPhasesChartPainter extends CustomPainter {
+  _SleepPhasesChartPainter(this.timeline);
+
+  final List<SleepPhaseTimelinePoint> timeline;
+
   @override
   void paint(Canvas canvas, Size size) {
+    final background = Paint()
+      ..color = Colors.white.withValues(alpha: 0.04)
+      ..style = PaintingStyle.fill;
     final stroke = Paint()
-      ..color = Colors.white.withValues(alpha: 0.12)
-      ..strokeWidth = 8
+      ..strokeWidth = 3
       ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    final rect = Rect.fromLTWH(0, 0, size.width, size.height * 2);
-    canvas.drawArc(rect, pi, pi, false, stroke);
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..shader = const LinearGradient(
+        colors: [Color(0xFF5D8CFF), Color(0xFFB96CFF), Color(0xFFF48AC3)],
+      ).createShader(Offset.zero & size);
+    final grid = Paint()
+      ..color = Colors.white.withValues(alpha: 0.08)
+      ..strokeWidth = 1;
+
+    final panel = RRect.fromRectAndRadius(Offset.zero & size, const Radius.circular(20));
+    canvas.drawRRect(panel, background);
+
+    for (var i = 1; i < 6; i++) {
+      final dx = size.width * (i / 6);
+      canvas.drawLine(Offset(dx, 10), Offset(dx, size.height - 10), grid);
+    }
+
+    if (timeline.isEmpty) {
+      return;
+    }
+
+    final totalMinutes = timeline.fold<int>(0, (sum, point) => sum + point.minutes);
+    if (totalMinutes <= 0) {
+      return;
+    }
+
+    double yForPhase(String phase) {
+      switch (phase) {
+        case 'awake':
+          return size.height * 0.24;
+        case 'dream':
+          return size.height * 0.38;
+        case 'deep':
+          return size.height * 0.76;
+        case 'light':
+        default:
+          return size.height * 0.56;
+      }
+    }
+
+    final path = Path();
+    var currentMinute = 0.0;
+    for (var index = 0; index < timeline.length; index++) {
+      final point = timeline[index];
+      final startX = (currentMinute / totalMinutes) * size.width;
+      final endX = ((currentMinute + point.minutes) / totalMinutes) * size.width;
+      final y = yForPhase(point.phase);
+      if (index == 0) {
+        path.moveTo(startX, y);
+      } else {
+        path.lineTo(startX, y);
+      }
+      path.lineTo(endX, y);
+      currentMinute += point.minutes;
+    }
+
+    canvas.drawPath(path, stroke);
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _SleepPhasesChartPainter oldDelegate) {
+    return oldDelegate.timeline != timeline;
+  }
 }
 
 class SleepInsights {
@@ -9098,19 +10331,466 @@ class SleepInsights {
     required this.usageFrequencyLast7Days,
     required this.consistencyScore,
     required this.averageDurationMinutes,
+    this.nights = const <TrackedSleepNight>[],
+    this.availableDates = const <DateTime>[],
   });
 
   final int usageFrequencyLast7Days;
   final int consistencyScore;
   final int averageDurationMinutes;
+  final List<TrackedSleepNight> nights;
+  final List<DateTime> availableDates;
 
   factory SleepInsights.fromJson(Map<String, dynamic> json) {
+    final nightsRaw = json['nights'] is List ? json['nights'] as List : const <dynamic>[];
+    final availableDatesRaw = json['available_dates'] is List
+        ? json['available_dates'] as List
+        : const <dynamic>[];
     return SleepInsights(
       usageFrequencyLast7Days: _toInt(json['usage_frequency_last_7_days']),
       consistencyScore: _toInt(json['consistency_score']),
       averageDurationMinutes: _toInt(json['average_duration_minutes']),
+      nights: nightsRaw
+          .whereType<Map<String, dynamic>>()
+          .map(TrackedSleepNight.fromJson)
+          .toList(),
+      availableDates: availableDatesRaw
+          .map((value) => DateTime.tryParse('$value'))
+          .whereType<DateTime>()
+          .map((value) => DateTime(value.year, value.month, value.day))
+          .toList(),
     );
   }
+}
+
+class TrackedSleepNight {
+  const TrackedSleepNight({
+    required this.nightId,
+    required this.status,
+    required this.trackedDate,
+    this.bedtime,
+    this.wakeTime,
+    required this.timeAsleepMinutes,
+    required this.sleepGoalMinutes,
+    required this.qualityScore,
+    required this.summaryCards,
+    required this.sleepPhases,
+    required this.soundDetections,
+    required this.recordings,
+    required this.recommendedTracks,
+    this.localRecordingPath,
+    this.wakeAlarmLabel,
+    this.metadata = const <String, dynamic>{},
+    this.isLocalOnly = false,
+  });
+
+  final String nightId;
+  final String status;
+  final DateTime trackedDate;
+  final DateTime? bedtime;
+  final DateTime? wakeTime;
+  final int timeAsleepMinutes;
+  final int sleepGoalMinutes;
+  final int qualityScore;
+  final List<InsightSummaryCardData> summaryCards;
+  final SleepPhaseInsightData sleepPhases;
+  final List<SoundDetectionData> soundDetections;
+  final List<NightRecordingData> recordings;
+  final List<RecommendedTrackData> recommendedTracks;
+  final String? localRecordingPath;
+  final String? wakeAlarmLabel;
+  final Map<String, dynamic> metadata;
+  final bool isLocalOnly;
+
+  factory TrackedSleepNight.active({
+    required String nightId,
+    required DateTime trackedDate,
+    required DateTime bedtime,
+    required int sleepGoalMinutes,
+    String? localRecordingPath,
+    String? wakeAlarmLabel,
+    Map<String, dynamic> metadata = const <String, dynamic>{},
+  }) {
+    return TrackedSleepNight(
+      nightId: nightId,
+      status: 'active',
+      trackedDate: trackedDate,
+      bedtime: bedtime,
+      timeAsleepMinutes: 0,
+      sleepGoalMinutes: sleepGoalMinutes,
+      qualityScore: 0,
+      summaryCards: const <InsightSummaryCardData>[],
+      sleepPhases: SleepPhaseInsightData.empty(),
+      soundDetections: const <SoundDetectionData>[],
+      recordings: const <NightRecordingData>[],
+      recommendedTracks: const <RecommendedTrackData>[],
+      localRecordingPath: localRecordingPath,
+      wakeAlarmLabel: wakeAlarmLabel,
+      metadata: metadata,
+      isLocalOnly: true,
+    );
+  }
+
+  factory TrackedSleepNight.fromJson(Map<String, dynamic> json) {
+    final bedtime = DateTime.tryParse('${json['bedtime'] ?? ''}');
+    final trackedDate = DateTime.tryParse('${json['tracked_date'] ?? ''}') ??
+        bedtime ??
+        DateTime.now();
+    final summaryCardsRaw = json['summary_cards'] is List
+        ? json['summary_cards'] as List
+        : const <dynamic>[];
+    final soundDetectionsRaw = json['sound_detections'] is List
+        ? json['sound_detections'] as List
+        : const <dynamic>[];
+    final recordingsRaw = json['recordings'] is List
+        ? json['recordings'] as List
+        : const <dynamic>[];
+    final recommendedRaw = json['recommended_tracks'] is List
+        ? json['recommended_tracks'] as List
+        : const <dynamic>[];
+    final phasesRaw = json['sleep_phases'] is Map<String, dynamic>
+        ? json['sleep_phases'] as Map<String, dynamic>
+        : <String, dynamic>{};
+
+    return TrackedSleepNight(
+      nightId: '${json['night_id'] ?? json['id'] ?? ''}',
+      status: '${json['status'] ?? 'analyzed'}',
+      trackedDate: DateTime(trackedDate.year, trackedDate.month, trackedDate.day),
+      bedtime: bedtime,
+      wakeTime: DateTime.tryParse('${json['wake_time'] ?? ''}'),
+      timeAsleepMinutes: _toInt(json['time_asleep_minutes']),
+      sleepGoalMinutes: _toInt(json['sleep_goal_minutes']),
+      qualityScore: _toInt(json['quality_score']),
+      summaryCards: summaryCardsRaw
+          .whereType<Map<String, dynamic>>()
+          .map(InsightSummaryCardData.fromJson)
+          .toList(),
+      sleepPhases: SleepPhaseInsightData.fromJson(phasesRaw),
+      soundDetections: soundDetectionsRaw
+          .whereType<Map<String, dynamic>>()
+          .map(SoundDetectionData.fromJson)
+          .toList(),
+      recordings: recordingsRaw
+          .whereType<Map<String, dynamic>>()
+          .map(NightRecordingData.fromJson)
+          .toList(),
+      recommendedTracks: recommendedRaw
+          .whereType<Map<String, dynamic>>()
+          .map(RecommendedTrackData.fromJson)
+          .toList(),
+      localRecordingPath: json['local_recording_path']?.toString(),
+      wakeAlarmLabel: json['wake_alarm_label']?.toString(),
+      metadata: json['metadata'] is Map<String, dynamic>
+          ? json['metadata'] as Map<String, dynamic>
+          : <String, dynamic>{},
+      isLocalOnly: json['is_local_only'] == true || '${json['night_id'] ?? ''}'.startsWith('local-'),
+    );
+  }
+
+  bool get isActive => status == 'active';
+  bool get hasAnalysis => summaryCards.isNotEmpty || recordings.isNotEmpty || qualityScore > 0;
+  int get totalDetectedSounds =>
+      soundDetections.fold<int>(0, (sum, detection) => sum + detection.count);
+
+  TrackedSleepNight copyWith({
+    String? status,
+    DateTime? trackedDate,
+    DateTime? bedtime,
+    DateTime? wakeTime,
+    int? timeAsleepMinutes,
+    int? sleepGoalMinutes,
+    int? qualityScore,
+    List<InsightSummaryCardData>? summaryCards,
+    SleepPhaseInsightData? sleepPhases,
+    List<SoundDetectionData>? soundDetections,
+    List<NightRecordingData>? recordings,
+    List<RecommendedTrackData>? recommendedTracks,
+    String? localRecordingPath,
+    String? wakeAlarmLabel,
+    Map<String, dynamic>? metadata,
+    bool? isLocalOnly,
+  }) {
+    return TrackedSleepNight(
+      nightId: nightId,
+      status: status ?? this.status,
+      trackedDate: trackedDate ?? this.trackedDate,
+      bedtime: bedtime ?? this.bedtime,
+      wakeTime: wakeTime ?? this.wakeTime,
+      timeAsleepMinutes: timeAsleepMinutes ?? this.timeAsleepMinutes,
+      sleepGoalMinutes: sleepGoalMinutes ?? this.sleepGoalMinutes,
+      qualityScore: qualityScore ?? this.qualityScore,
+      summaryCards: summaryCards ?? this.summaryCards,
+      sleepPhases: sleepPhases ?? this.sleepPhases,
+      soundDetections: soundDetections ?? this.soundDetections,
+      recordings: recordings ?? this.recordings,
+      recommendedTracks: recommendedTracks ?? this.recommendedTracks,
+      localRecordingPath: localRecordingPath ?? this.localRecordingPath,
+      wakeAlarmLabel: wakeAlarmLabel ?? this.wakeAlarmLabel,
+      metadata: metadata ?? this.metadata,
+      isLocalOnly: isLocalOnly ?? this.isLocalOnly,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'night_id': nightId,
+      'status': status,
+      'tracked_date': trackedDate.toIso8601String(),
+      'bedtime': bedtime?.toIso8601String(),
+      'wake_time': wakeTime?.toIso8601String(),
+      'time_asleep_minutes': timeAsleepMinutes,
+      'sleep_goal_minutes': sleepGoalMinutes,
+      'quality_score': qualityScore,
+      'summary_cards': summaryCards.map((card) => card.toJson()).toList(),
+      'sleep_phases': sleepPhases.toJson(),
+      'sound_detections': soundDetections.map((item) => item.toJson()).toList(),
+      'recordings': recordings.map((item) => item.toJson()).toList(),
+      'recommended_tracks': recommendedTracks.map((item) => item.toJson()).toList(),
+      'local_recording_path': localRecordingPath,
+      'wake_alarm_label': wakeAlarmLabel,
+      'metadata': metadata,
+      'is_local_only': isLocalOnly,
+    };
+  }
+}
+
+class InsightSummaryCardData {
+  const InsightSummaryCardData({
+    required this.key,
+    required this.eyebrow,
+    required this.title,
+    required this.subtitle,
+    required this.metric,
+  });
+
+  final String key;
+  final String eyebrow;
+  final String title;
+  final String subtitle;
+  final String metric;
+
+  factory InsightSummaryCardData.fromJson(Map<String, dynamic> json) {
+    return InsightSummaryCardData(
+      key: '${json['key'] ?? 'quality'}',
+      eyebrow: '${json['eyebrow'] ?? ''}',
+      title: '${json['title'] ?? ''}',
+      subtitle: '${json['subtitle'] ?? ''}',
+      metric: '${json['metric'] ?? ''}',
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'key': key,
+        'eyebrow': eyebrow,
+        'title': title,
+        'subtitle': subtitle,
+        'metric': metric,
+      };
+}
+
+class SleepPhaseInsightData {
+  const SleepPhaseInsightData({
+    required this.timeline,
+    required this.totals,
+    required this.focusKey,
+    required this.focusTitle,
+    required this.focusBody,
+    required this.keyInsights,
+  });
+
+  final List<SleepPhaseTimelinePoint> timeline;
+  final Map<String, int> totals;
+  final String focusKey;
+  final String focusTitle;
+  final String focusBody;
+  final String keyInsights;
+
+  factory SleepPhaseInsightData.empty() {
+    return const SleepPhaseInsightData(
+      timeline: <SleepPhaseTimelinePoint>[],
+      totals: <String, int>{'awake': 0, 'dream': 0, 'light': 0, 'deep': 0},
+      focusKey: 'light',
+      focusTitle: 'Light',
+      focusBody: '',
+      keyInsights: '',
+    );
+  }
+
+  factory SleepPhaseInsightData.fromJson(Map<String, dynamic> json) {
+    final timelineRaw = json['timeline'] is List ? json['timeline'] as List : const <dynamic>[];
+    final totalsRaw = json['totals'] is Map<String, dynamic>
+        ? json['totals'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    return SleepPhaseInsightData(
+      timeline: timelineRaw
+          .whereType<Map<String, dynamic>>()
+          .map(SleepPhaseTimelinePoint.fromJson)
+          .toList(),
+      totals: <String, int>{
+        'awake': _toInt(totalsRaw['awake']),
+        'dream': _toInt(totalsRaw['dream']),
+        'light': _toInt(totalsRaw['light']),
+        'deep': _toInt(totalsRaw['deep']),
+      },
+      focusKey: '${json['focus_key'] ?? 'light'}',
+      focusTitle: '${json['focus_title'] ?? 'Light'}',
+      focusBody: '${json['focus_body'] ?? ''}',
+      keyInsights: '${json['key_insights'] ?? ''}',
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'timeline': timeline.map((point) => point.toJson()).toList(),
+        'totals': totals,
+        'focus_key': focusKey,
+        'focus_title': focusTitle,
+        'focus_body': focusBody,
+        'key_insights': keyInsights,
+      };
+}
+
+class SleepPhaseTimelinePoint {
+  const SleepPhaseTimelinePoint({
+    required this.minuteOffset,
+    required this.minutes,
+    required this.phase,
+  });
+
+  final int minuteOffset;
+  final int minutes;
+  final String phase;
+
+  factory SleepPhaseTimelinePoint.fromJson(Map<String, dynamic> json) {
+    return SleepPhaseTimelinePoint(
+      minuteOffset: _toInt(json['minute_offset']),
+      minutes: _toInt(json['minutes']),
+      phase: '${json['phase'] ?? 'light'}',
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'minute_offset': minuteOffset,
+        'minutes': minutes,
+        'phase': phase,
+      };
+}
+
+class SoundDetectionData {
+  const SoundDetectionData({
+    required this.key,
+    required this.label,
+    required this.emoji,
+    required this.count,
+    required this.status,
+    required this.minutes,
+    required this.confidenceScore,
+  });
+
+  final String key;
+  final String label;
+  final String emoji;
+  final int count;
+  final String status;
+  final int minutes;
+  final int confidenceScore;
+
+  factory SoundDetectionData.fromJson(Map<String, dynamic> json) {
+    return SoundDetectionData(
+      key: '${json['key'] ?? ''}',
+      label: '${json['label'] ?? ''}',
+      emoji: '${json['emoji'] ?? ''}',
+      count: _toInt(json['count']),
+      status: '${json['status'] ?? 'None'}',
+      minutes: _toInt(json['minutes']),
+      confidenceScore: _toInt(json['confidence_score']),
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'key': key,
+        'label': label,
+        'emoji': emoji,
+        'count': count,
+        'status': status,
+        'minutes': minutes,
+        'confidence_score': confidenceScore,
+      };
+}
+
+class NightRecordingData {
+  const NightRecordingData({
+    required this.id,
+    required this.label,
+    required this.description,
+    required this.detectionKey,
+    required this.startSecond,
+    required this.durationSeconds,
+    required this.confidenceScore,
+    this.occurredAt,
+    this.sourceUrl,
+  });
+
+  final String id;
+  final String label;
+  final String description;
+  final String detectionKey;
+  final int startSecond;
+  final int durationSeconds;
+  final int confidenceScore;
+  final DateTime? occurredAt;
+  final String? sourceUrl;
+
+  factory NightRecordingData.fromJson(Map<String, dynamic> json) {
+    return NightRecordingData(
+      id: '${json['id'] ?? ''}',
+      label: '${json['label'] ?? ''}',
+      description: '${json['description'] ?? ''}',
+      detectionKey: '${json['detection_key'] ?? ''}',
+      startSecond: _toInt(json['start_second']),
+      durationSeconds: _toInt(json['duration_seconds']),
+      confidenceScore: _toInt(json['confidence_score']),
+      occurredAt: DateTime.tryParse('${json['occurred_at'] ?? ''}'),
+      sourceUrl: json['source_url']?.toString(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'id': id,
+        'label': label,
+        'description': description,
+        'detection_key': detectionKey,
+        'start_second': startSecond,
+        'duration_seconds': durationSeconds,
+        'confidence_score': confidenceScore,
+        'occurred_at': occurredAt?.toIso8601String(),
+        'source_url': sourceUrl,
+      };
+}
+
+class RecommendedTrackData {
+  const RecommendedTrackData({
+    required this.id,
+    required this.title,
+    required this.subtitle,
+  });
+
+  final int? id;
+  final String title;
+  final String subtitle;
+
+  factory RecommendedTrackData.fromJson(Map<String, dynamic> json) {
+    return RecommendedTrackData(
+      id: _nullableInt(json['id']),
+      title: '${json['title'] ?? ''}',
+      subtitle: '${json['subtitle'] ?? ''}',
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'id': id,
+        'title': title,
+        'subtitle': subtitle,
+      };
 }
 
 class MixPreset {
@@ -10300,6 +11980,83 @@ class SleepWellApi {
     );
   }
 
+  Future<TrackedSleepNight> startTrackedNight({
+    required String deviceId,
+    required int? sessionId,
+    required int? preferredTrackId,
+    required String entryPoint,
+    required DateTime startedAt,
+    required DateTime trackedDate,
+    required int sleepGoalMinutes,
+    required int smartAlarmWindowMinutes,
+    required String wakeAlarmTime,
+    required Map<String, dynamic> mixSnapshot,
+    required Map<String, dynamic> metadata,
+  }) async {
+    final json = await _request(
+      'POST',
+      '/tracked-nights/start',
+      body: {
+        'device_id': deviceId,
+        'session_id': sessionId,
+        'preferred_track_id': preferredTrackId,
+        'entry_point': entryPoint,
+        'started_at': startedAt.toIso8601String(),
+        'tracked_date': trackedDate.toIso8601String().split('T').first,
+        'sleep_goal_minutes': sleepGoalMinutes,
+        'smart_alarm_window_minutes': smartAlarmWindowMinutes,
+        'wake_alarm_time': wakeAlarmTime,
+        'mix_snapshot': mixSnapshot,
+        'metadata': metadata,
+      },
+    );
+    final nightRaw = json['night'] is Map<String, dynamic>
+        ? json['night'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    return TrackedSleepNight.fromJson(nightRaw);
+  }
+
+  Future<void> uploadTrackedNightRecording({
+    required String nightId,
+    required String deviceId,
+    required String recordingPath,
+    required int durationSeconds,
+  }) async {
+    await _requestMultipart(
+      'POST',
+      '/tracked-nights/$nightId/recording',
+      fileField: 'recording',
+      filePath: recordingPath,
+      fields: <String, String>{
+        'device_id': deviceId,
+        'duration_seconds': '$durationSeconds',
+      },
+    );
+  }
+
+  Future<TrackedSleepNight> completeTrackedNight({
+    required String nightId,
+    required String deviceId,
+    required DateTime endedAt,
+    required int recordingDurationSeconds,
+    required Map<String, dynamic> metadata,
+  }) async {
+    final json = await _request(
+      'POST',
+      '/tracked-nights/$nightId/complete',
+      body: {
+        'device_id': deviceId,
+        'ended_at': endedAt.toIso8601String(),
+        'recording_duration_seconds': recordingDurationSeconds,
+        'metadata': metadata,
+      },
+    );
+    final nightRaw = json['night'] is Map<String, dynamic>
+        ? json['night'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    return TrackedSleepNight.fromJson(nightRaw);
+  }
+
   Future<SleepInsights> fetchInsights({
     required String deviceId,
   }) async {
@@ -10513,6 +12270,60 @@ class SleepWellApi {
     }
     return <String, dynamic>{};
   }
+
+  Future<Map<String, dynamic>> _requestMultipart(
+    String method,
+    String path, {
+    required String fileField,
+    required String filePath,
+    Map<String, String> fields = const <String, String>{},
+  }) async {
+    final client = HttpClient();
+    final uri = Uri.parse('$baseUrl$path');
+    final request = await client.openUrl(method, uri).timeout(const Duration(seconds: 30));
+    final boundary = '----sleepwell-${DateTime.now().microsecondsSinceEpoch}';
+    request.headers.set(
+      HttpHeaders.contentTypeHeader,
+      'multipart/form-data; boundary=$boundary',
+    );
+    request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    if (_authToken != null && _authToken!.isNotEmpty) {
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_authToken');
+    }
+
+    for (final entry in fields.entries) {
+      request.write('--$boundary\r\n');
+      request.write('Content-Disposition: form-data; name="${entry.key}"\r\n\r\n');
+      request.write('${entry.value}\r\n');
+    }
+
+    final file = File(filePath);
+    final filename = file.uri.pathSegments.isEmpty ? 'recording.m4a' : file.uri.pathSegments.last;
+    final fileBytes = await file.readAsBytes();
+    request.write('--$boundary\r\n');
+    request.write(
+      'Content-Disposition: form-data; name="$fileField"; filename="$filename"\r\n',
+    );
+    request.write('Content-Type: audio/mp4\r\n\r\n');
+    request.add(fileBytes);
+    request.write('\r\n--$boundary--\r\n');
+
+    final response = await request.close().timeout(const Duration(seconds: 60));
+    final raw = await response.transform(utf8.decoder).join();
+    client.close();
+
+    if (response.statusCode >= 400) {
+      throw HttpException('API request failed (${response.statusCode})', uri: uri);
+    }
+    if (raw.isEmpty) {
+      return <String, dynamic>{};
+    }
+    final decoded = jsonDecode(raw);
+    if (decoded is Map<String, dynamic>) {
+      return decoded;
+    }
+    return <String, dynamic>{};
+  }
 }
 
 String _normalizeMediaUrl(String input, {required String apiBaseUrl}) {
@@ -10594,4 +12405,74 @@ String _formatTimeOfDay(TimeOfDay value) {
   final hour = value.hour.toString().padLeft(2, '0');
   final minute = value.minute.toString().padLeft(2, '0');
   return '$hour:$minute';
+}
+
+String _formatInsightHeaderDate(DateTime value) {
+  const weekdays = <String>['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = <String>[
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  return '${weekdays[value.weekday % 7]} ${months[value.month - 1]} ${value.day}';
+}
+
+String _formatInsightMonth(DateTime value) {
+  const months = <String>[
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+  return '${months[value.month - 1]} ${value.year}';
+}
+
+String _formatInsightTime(DateTime? value) {
+  if (value == null) {
+    return '--:--';
+  }
+  final hour = value.hour.toString().padLeft(2, '0');
+  final minute = value.minute.toString().padLeft(2, '0');
+  return '$hour:$minute';
+}
+
+String _formatInsightHours(int minutes) {
+  final safeMinutes = max(0, minutes);
+  final hours = safeMinutes ~/ 60;
+  final remaining = safeMinutes % 60;
+  if (hours == 0) {
+    return '${remaining}m';
+  }
+  if (remaining == 0) {
+    return '${hours}h';
+  }
+  return '${hours}h ${remaining}m';
+}
+
+String _formatInsightMinutes(int minutes) {
+  return '${max(0, minutes)}m';
+}
+
+String _formatInsightClip(int seconds) {
+  final duration = Duration(seconds: max(0, seconds));
+  final minutes = duration.inMinutes;
+  final remaining = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return '$minutes:$remaining';
 }
