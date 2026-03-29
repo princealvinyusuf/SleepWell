@@ -133,7 +133,7 @@ class _UiBaseline {
   static const double savedThumbSize = 70;
   static const double savedRowTitleSize = 17;
   static const double savedRowSubtitleSize = 14.5;
-  static const double savedMiniPlayerBottomGap = 92;
+  static const double savedMiniPlayerBottomGap = 10;
 
   static const double profileTitleSize = 36;
   static const double profileHeroTitleSize = 40;
