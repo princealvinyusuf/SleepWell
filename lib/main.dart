@@ -118,6 +118,31 @@ Widget _playerPageForTrack({
   return NowPlayingPage(state: state, track: track);
 }
 
+Future<void> openSleepRecorderFlow(
+  BuildContext context,
+  SleepWellState state, {
+  SleepTrack? preferredTrack,
+  String entryPoint = 'track_my_sleep',
+}) async {
+  if (state.selectedTrack == null && preferredTrack != null) {
+    await state.playTrack(preferredTrack);
+  } else if (state.selectedTrack == null && state.tracks.isNotEmpty) {
+    await state.playTrack(state.tracks.first);
+  }
+  if (!context.mounted) {
+    return;
+  }
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => SleepRecorderFlowPage(
+        state: state,
+        preferredTrack: preferredTrack ?? state.selectedTrack,
+        entryPoint: entryPoint,
+      ),
+    ),
+  );
+}
+
 // Frozen baseline tokens (final UI pass) for consistent spacing/radius.
 class _UiBaseline {
   static const double pageHorizontal = 16;
@@ -235,7 +260,13 @@ class SleepWellState extends ChangeNotifier {
   TimeOfDay bedtimeTime = const TimeOfDay(hour: 22, minute: 30);
   bool wakeAlarmEnabled = false;
   TimeOfDay wakeAlarmTime = const TimeOfDay(hour: 8, minute: 0);
+  int smartAlarmWindowMinutes = 30;
   String appLanguage = 'en';
+  int sleepGoalHours = 8;
+  bool microphonePermissionGranted = false;
+  bool hasUsedSleepRecorder = false;
+  bool sleepRecorderActive = false;
+  DateTime? sleepRecorderStartedAt;
   DateTime? _lastBedtimeTriggerAt;
   int sleepTimerMinutes = 30;
   DateTime? _sleepTimerEndsAt;
@@ -522,6 +553,8 @@ class SleepWellState extends ChangeNotifier {
     _activeSessionId = null;
     _sessionStartedAt = null;
     _activeMixKinds.clear();
+    sleepRecorderActive = false;
+    sleepRecorderStartedAt = null;
     await _persistLocalState();
     await refreshInsights();
     notifyListeners();
@@ -854,6 +887,82 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setSleepGoalHours(int hours) {
+    sleepGoalHours = hours.clamp(6, 10);
+    unawaited(_persistLocalState());
+    notifyListeners();
+  }
+
+  void setSmartAlarmWindowMinutes(int minutes) {
+    smartAlarmWindowMinutes = minutes.clamp(0, 60);
+    unawaited(_persistLocalState());
+    notifyListeners();
+  }
+
+  void setMicrophonePermissionGranted(bool granted) {
+    microphonePermissionGranted = granted;
+    if (granted) {
+      hasUsedSleepRecorder = true;
+    }
+    unawaited(_persistLocalState());
+    notifyListeners();
+  }
+
+  Future<void> startSleepRecorder({SleepTrack? preferredTrack}) async {
+    if (preferredTrack != null && selectedTrack == null) {
+      selectedTrack = preferredTrack;
+    }
+    if (selectedTrack == null && tracks.isNotEmpty) {
+      await playTrack(tracks.first);
+    }
+    if (sleepRecorderActive) {
+      hasUsedSleepRecorder = true;
+      await _persistLocalState();
+      notifyListeners();
+      return;
+    }
+    hasUsedSleepRecorder = true;
+    sleepRecorderActive = true;
+    sleepRecorderStartedAt = DateTime.now();
+    if (!wakeAlarmEnabled) {
+      wakeAlarmEnabled = true;
+    }
+    await _persistLocalState();
+    await logUiAction('sleep_recorder_start');
+    notifyListeners();
+  }
+
+  Future<void> stopSleepRecorder() async {
+    if (!sleepRecorderActive) {
+      return;
+    }
+    sleepRecorderActive = false;
+    sleepRecorderStartedAt = null;
+    await stopPlayback();
+    await logUiAction('sleep_recorder_stop');
+    await _persistLocalState();
+    await refreshInsights();
+    notifyListeners();
+  }
+
+  String get smartAlarmRangeLabel {
+    final end = _timeOfDayToDateTime(wakeAlarmTime);
+    final start = end.subtract(Duration(minutes: smartAlarmWindowMinutes));
+    return '${_formatWakeLabel(start)} - ${_formatWakeLabel(end)}';
+  }
+
+  DateTime _timeOfDayToDateTime(TimeOfDay value) {
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day, value.hour, value.minute);
+  }
+
+  String _formatWakeLabel(DateTime value) {
+    final hour = value.hour % 12 == 0 ? 12 : value.hour % 12;
+    final minute = value.minute.toString().padLeft(2, '0');
+    final period = value.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $period';
+  }
+
   Future<void> setLoopEnabled(bool enabled) async {
     loop = enabled;
     if (_enableAudio) {
@@ -1171,6 +1280,16 @@ class SleepWellState extends ChangeNotifier {
     final wakeHour = prefs.getInt('wake_alarm_hour') ?? wakeAlarmTime.hour;
     final wakeMinute = prefs.getInt('wake_alarm_minute') ?? wakeAlarmTime.minute;
     wakeAlarmTime = TimeOfDay(hour: wakeHour, minute: wakeMinute);
+    smartAlarmWindowMinutes = prefs.getInt('smart_alarm_window_minutes') ?? smartAlarmWindowMinutes;
+    sleepGoalHours = prefs.getInt('sleep_goal_hours') ?? sleepGoalHours;
+    microphonePermissionGranted =
+        prefs.getBool('microphone_permission_granted') ?? microphonePermissionGranted;
+    hasUsedSleepRecorder = prefs.getBool('has_used_sleep_recorder') ?? hasUsedSleepRecorder;
+    sleepRecorderActive = prefs.getBool('sleep_recorder_active') ?? sleepRecorderActive;
+    final sleepRecorderStartedAtRaw = prefs.getString('sleep_recorder_started_at');
+    if (sleepRecorderStartedAtRaw != null && sleepRecorderStartedAtRaw.isNotEmpty) {
+      sleepRecorderStartedAt = DateTime.tryParse(sleepRecorderStartedAtRaw);
+    }
     appLanguage = prefs.getString('app_language') ?? appLanguage;
     selectedSleepGoal = prefs.getString('selected_sleep_goal') ?? selectedSleepGoal;
     authToken = prefs.getString('auth_token');
@@ -1268,6 +1387,16 @@ class SleepWellState extends ChangeNotifier {
     await prefs.setBool('wake_alarm_enabled', wakeAlarmEnabled);
     await prefs.setInt('wake_alarm_hour', wakeAlarmTime.hour);
     await prefs.setInt('wake_alarm_minute', wakeAlarmTime.minute);
+    await prefs.setInt('smart_alarm_window_minutes', smartAlarmWindowMinutes);
+    await prefs.setInt('sleep_goal_hours', sleepGoalHours);
+    await prefs.setBool('microphone_permission_granted', microphonePermissionGranted);
+    await prefs.setBool('has_used_sleep_recorder', hasUsedSleepRecorder);
+    await prefs.setBool('sleep_recorder_active', sleepRecorderActive);
+    if (sleepRecorderStartedAt != null) {
+      await prefs.setString('sleep_recorder_started_at', sleepRecorderStartedAt!.toIso8601String());
+    } else {
+      await prefs.remove('sleep_recorder_started_at');
+    }
     await prefs.setString('app_language', appLanguage);
     await prefs.setString('selected_sleep_goal', selectedSleepGoal);
     await prefs.setString('mixer_state', jsonEncode(mixer));
@@ -2675,6 +2804,22 @@ class _HomeScreenState extends State<HomeScreen> {
     final analyticsEvent = item.meta['analytics_event']?.toString();
     if (analyticsEvent != null && analyticsEvent.isNotEmpty) {
       await widget.state.logUiAction(analyticsEvent);
+    }
+
+    final isTrackMySleepAction = source == 'insight_snore' ||
+        (item.ctaLabel ?? '').trim().toLowerCase() == 'track my sleep';
+    if (isTrackMySleepAction) {
+      final track = widget.state.selectedTrack ?? _findTrackByText(widget.state, item.title);
+      if (!context.mounted) {
+        return;
+      }
+      await openSleepRecorderFlow(
+        context,
+        widget.state,
+        preferredTrack: track,
+        entryPoint: source,
+      );
+      return;
     }
 
     if (action == 'navigate_tab' && targetTab != null) {
@@ -6909,24 +7054,10 @@ class NowPlayingPage extends StatelessWidget {
                               ),
                               const SizedBox(height: 10),
                               Center(
-                                child: FilledButton(
-                                  style: FilledButton.styleFrom(
-                                    backgroundColor: Colors.white,
-                                    foregroundColor: Colors.black,
-                                    minimumSize: const Size(220, 50),
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
-                                  ),
-                                  onPressed: () async {
-                                    await state.logUiAction('track_my_sleep_now_playing');
-                                    await state.startSleepNow(entryPoint: 'track_detail_track_sleep');
-                                    if (!context.mounted) {
-                                      return;
-                                    }
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text('Sleep tracking started')),
-                                    );
-                                  },
-                                  child: const Text('Track My Sleep'),
+                                child: _buildTrackSleepButton(
+                                  context,
+                                  track: track,
+                                  activeKind: activeKind,
                                 ),
                               ),
                             ],
@@ -7179,15 +7310,11 @@ class NowPlayingPage extends StatelessWidget {
                       const SizedBox(height: 10),
                       SizedBox(
                         width: double.infinity,
-                        child: FilledButton(
-                          style: FilledButton.styleFrom(
-                            backgroundColor: Colors.white.withValues(alpha: 0.2),
-                            foregroundColor: Colors.white,
-                          ),
-                          onPressed: () async {
-                            await state.startSleepNow(entryPoint: 'ambient_player_track_sleep');
-                          },
-                          child: const Text('Track My Sleep'),
+                        child: _buildTrackSleepButton(
+                          context,
+                          track: selectedTrack,
+                          activeKind: activeKind,
+                          compactGradient: true,
                         ),
                       ),
                     ],
@@ -7422,6 +7549,67 @@ class NowPlayingPage extends StatelessWidget {
     }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('"${name.trim()}" saved to your library.')),
+    );
+  }
+
+  Widget _buildTrackSleepButton(
+    BuildContext context, {
+    required SleepTrack track,
+    required TrackPlayerKind activeKind,
+    bool compactGradient = false,
+  }) {
+    if (state.sleepRecorderActive) {
+      return Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(999),
+          gradient: const LinearGradient(
+            colors: [Color(0xFFFFA24E), Color(0xFF6B32FF)],
+          ),
+        ),
+        child: FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: Colors.transparent,
+            shadowColor: Colors.transparent,
+            foregroundColor: Colors.white,
+            minimumSize: Size(double.infinity, compactGradient ? 52 : 50),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+          ),
+          onPressed: () async {
+            await openSleepRecorderFlow(
+              context,
+              state,
+              preferredTrack: track,
+              entryPoint: 'open_sleep_recorder_button',
+            );
+          },
+          child: const Text(
+            'Open Sleep Recorder',
+            style: TextStyle(fontWeight: FontWeight.w700),
+          ),
+        ),
+      );
+    }
+
+    return FilledButton(
+      style: FilledButton.styleFrom(
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black,
+        minimumSize: const Size(220, 50),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+      ),
+      onPressed: () async {
+        await state.logUiAction('track_my_sleep_now_playing');
+        if (!context.mounted) {
+          return;
+        }
+        await openSleepRecorderFlow(
+          context,
+          state,
+          preferredTrack: track,
+          entryPoint: 'track_my_sleep_now_playing',
+        );
+      },
+      child: const Text('Track My Sleep'),
     );
   }
 
@@ -7759,6 +7947,759 @@ class MixerPage extends StatelessWidget {
   }
 }
 
+class SleepRecorderFlowPage extends StatefulWidget {
+  const SleepRecorderFlowPage({
+    super.key,
+    required this.state,
+    required this.entryPoint,
+    this.preferredTrack,
+  });
+
+  final SleepWellState state;
+  final SleepTrack? preferredTrack;
+  final String entryPoint;
+
+  @override
+  State<SleepRecorderFlowPage> createState() => _SleepRecorderFlowPageState();
+}
+
+class _SleepRecorderFlowPageState extends State<SleepRecorderFlowPage> {
+  late int _step;
+  late double _goalHours;
+  Timer? _clockTicker;
+  DateTime _now = DateTime.now();
+
+  @override
+  void initState() {
+    super.initState();
+    _goalHours = widget.state.sleepGoalHours.toDouble();
+    _step = widget.state.hasUsedSleepRecorder ? 5 : 0;
+    _clockTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _now = DateTime.now());
+    });
+    if (_step == 5) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await widget.state.startSleepRecorder(preferredTrack: widget.preferredTrack);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _clockTicker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.state,
+      builder: (context, _) {
+        return Scaffold(
+          body: Stack(
+            children: [
+              Positioned.fill(
+                child: Container(
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0xFF2B2668), Color(0xFF19143B), Color(0xFF0F1121)],
+                    ),
+                  ),
+                ),
+              ),
+              SafeArea(child: _buildCurrentStep(context)),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildCurrentStep(BuildContext context) {
+    switch (_step) {
+      case 0:
+        return _welcomeStep(context);
+      case 1:
+        return _goalStep(context);
+      case 2:
+        return _smartAlarmIntroStep(context);
+      case 3:
+        return _smartAlarmConfigStep(context);
+      case 4:
+        return _readyForBedStep(context);
+      case 5:
+      default:
+        return _activeRecorderStep(context);
+    }
+  }
+
+  Widget _welcomeStep(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(28, 24, 28, 24),
+      child: Column(
+        children: [
+          const Spacer(),
+          const CircleAvatar(
+            radius: 42,
+            backgroundColor: Colors.white12,
+            child: Text('🌙', style: TextStyle(fontSize: 34)),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Welcome to your\nSleep Recorder',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 34),
+          _recorderBenefit(icon: Icons.bed_rounded, title: 'Unlock more insights', body: 'Record your sleep length, debt, and patterns'),
+          const SizedBox(height: 22),
+          _recorderBenefit(icon: Icons.mic_rounded, title: 'Record sleep sounds', body: 'Observe the noises that happen in your sleep'),
+          const SizedBox(height: 22),
+          _recorderBenefit(icon: Icons.alarm_on_rounded, title: 'Wake up refreshed', body: 'Start your day with a personalized soothing alarm'),
+          const Spacer(),
+          _primaryRecorderButton(
+            label: 'Continue',
+            onPressed: () async {
+              final granted = await _showMicrophonePrompt(context);
+              widget.state.setMicrophonePermissionGranted(granted);
+              if (!mounted) {
+                return;
+              }
+              setState(() => _step = 1);
+            },
+          ),
+          const SizedBox(height: 14),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Not Now', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _goalStep(BuildContext context) {
+    final hours = _goalHours.round();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(28, 24, 28, 24),
+      child: Column(
+        children: [
+          const Spacer(),
+          const Text(
+            'How many hours do you aim\nfor each night?',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 28),
+          const Text(
+            'Getting 7 to 9 hours of sleep can\nimprove your health, mood and overall\nwell-being.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white70, fontSize: 16),
+          ),
+          const SizedBox(height: 42),
+          Text('$hours h', style: const TextStyle(fontSize: 42, fontWeight: FontWeight.w800)),
+          Slider(
+            value: _goalHours,
+            min: 6,
+            max: 10,
+            divisions: 4,
+            onChanged: (value) => setState(() => _goalHours = value),
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: const [
+              Text('6', style: TextStyle(color: Colors.white54)),
+              Text('7', style: TextStyle(color: Colors.white54)),
+              Text('8', style: TextStyle(color: Colors.white54)),
+              Text('9', style: TextStyle(color: Colors.white54)),
+              Text('10', style: TextStyle(color: Colors.white54)),
+            ],
+          ),
+          const Spacer(),
+          _primaryRecorderButton(
+            label: 'Save Sleep Goal',
+            onPressed: () {
+              widget.state.setSleepGoalHours(hours);
+              setState(() => _step = 2);
+            },
+          ),
+          const SizedBox(height: 14),
+          TextButton(
+            onPressed: () => setState(() => _step = 2),
+            child: const Text('Not Now', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _smartAlarmIntroStep(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(28, 24, 28, 24),
+      child: Column(
+        children: [
+          const Spacer(),
+          Container(
+            height: 220,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              gradient: const LinearGradient(colors: [Color(0xFF6927D1), Color(0xFF30145C)]),
+            ),
+            alignment: Alignment.center,
+            child: const Icon(Icons.alarm_on_rounded, size: 84, color: Colors.white),
+          ),
+          const SizedBox(height: 30),
+          const Text(
+            'Then, set your smart alarm',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Smart alarm uses sleep tracking for\noptimal wake up, providing a natural and\nrefreshing start to your day.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white70, fontSize: 16),
+          ),
+          const Spacer(),
+          _primaryRecorderButton(
+            label: 'Set Smart Alarm',
+            onPressed: () => setState(() => _step = 3),
+          ),
+          const SizedBox(height: 14),
+          TextButton(
+            onPressed: () => setState(() => _step = 4),
+            child: const Text('Not Now', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _smartAlarmConfigStep(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(28, 24, 28, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          IconButton(
+            onPressed: () => setState(() => _step = 2),
+            icon: const Icon(Icons.arrow_back_ios_new_rounded),
+          ),
+          const SizedBox(height: 18),
+          const Text(
+            'Wake up gently at',
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const Icon(Icons.alarm_rounded, color: Colors.white70),
+              const SizedBox(width: 8),
+              Text(widget.state.smartAlarmRangeLabel, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            ],
+          ),
+          const SizedBox(height: 28),
+          InkWell(
+            borderRadius: BorderRadius.circular(22),
+            onTap: () async {
+              final picked = await showTimePicker(
+                context: context,
+                initialTime: widget.state.wakeAlarmTime,
+              );
+              if (picked != null) {
+                widget.state.setWakeAlarmTime(picked);
+              }
+            },
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 28),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: Colors.white12),
+                color: Colors.white.withValues(alpha: 0.03),
+              ),
+              child: Center(
+                child: Text(
+                  _formatAlarmWheel(widget.state.wakeAlarmTime),
+                  style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 22),
+          InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: () async {
+              final selected = await _showSmartAlarmWindowPicker(context);
+              if (selected != null) {
+                widget.state.setSmartAlarmWindowMinutes(selected);
+              }
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 18),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(18),
+                color: Colors.white.withValues(alpha: 0.05),
+              ),
+              child: Row(
+                children: [
+                  const Text('Wake up window', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                  const Spacer(),
+                  Text('${widget.state.smartAlarmWindowMinutes} minutes', style: const TextStyle(color: Colors.white70)),
+                  const SizedBox(width: 8),
+                  const Icon(Icons.chevron_right_rounded),
+                ],
+              ),
+            ),
+          ),
+          const Spacer(),
+          _primaryRecorderButton(
+            label: 'Confirm The Alarm',
+            onPressed: () async {
+              widget.state.setWakeAlarmEnabled(true);
+              if (!mounted) {
+                return;
+              }
+              setState(() => _step = 4);
+            },
+          ),
+          const SizedBox(height: 14),
+          Center(
+            child: TextButton(
+              onPressed: () => setState(() => _step = 4),
+              child: const Text('Not Now', style: TextStyle(color: Colors.white)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _readyForBedStep(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(28, 0, 28, 24),
+      child: Column(
+        children: [
+          Expanded(
+            child: Container(
+              width: double.infinity,
+              decoration: const BoxDecoration(
+                borderRadius: BorderRadius.vertical(bottom: Radius.circular(28)),
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0xFF7B6C68), Color(0xFF312B49)],
+                ),
+              ),
+              alignment: Alignment.topCenter,
+              padding: const EdgeInsets.only(top: 70),
+              child: const Text('🦋', style: TextStyle(fontSize: 36)),
+            ),
+          ),
+          const SizedBox(height: 28),
+          const Text(
+            'Ready for bed?',
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Plug your phone in and place it close to\nyour bed.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white70, fontSize: 16),
+          ),
+          const SizedBox(height: 28),
+          _primaryRecorderButton(
+            label: 'Continue',
+            onPressed: () async {
+              await widget.state.startSleepRecorder(preferredTrack: widget.preferredTrack);
+              if (!mounted) {
+                return;
+              }
+              setState(() => _step = 5);
+            },
+          ),
+          const SizedBox(height: 14),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text("Don't Remind Me", style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _activeRecorderStep(BuildContext context) {
+    final state = widget.state;
+    final track = state.selectedTrack ?? widget.preferredTrack;
+    final savedMixes = state.savedMixItems.take(4).toList();
+    final timerText = state.hasActiveSleepTimer ? _formatTimerCountdown(state.remainingSleepTimer) : null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 18, 14, 18),
+      child: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 18),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(28),
+              color: Colors.black.withValues(alpha: 0.18),
+            ),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.keyboard_arrow_down_rounded),
+                    ),
+                    const Spacer(),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Text('🌙', style: TextStyle(fontSize: 48)),
+                const SizedBox(height: 10),
+                Text(
+                  _formatRecorderClock(_now),
+                  style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(999),
+                    color: Colors.white.withValues(alpha: 0.08),
+                  ),
+                  child: Text(
+                    '⏰ ${state.smartAlarmRangeLabel}',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: const [
+                    Text('Recent', style: TextStyle(fontWeight: FontWeight.w800)),
+                    Text('Favorites', style: TextStyle(color: Colors.white54, fontWeight: FontWeight.w700)),
+                    Text('Recommended', style: TextStyle(color: Colors.white54, fontWeight: FontWeight.w700)),
+                    Text('Mixes', style: TextStyle(color: Colors.white54, fontWeight: FontWeight.w700)),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                SizedBox(
+                  height: 176,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    physics: const BouncingScrollPhysics(),
+                    children: [
+                      _recorderCurrentSelectionCard(
+                        title: track?.title ?? 'Current Selection',
+                        subtitle: 'Mix',
+                        duration: state.currentDuration,
+                        position: state.currentPosition,
+                        timerText: timerText,
+                        isPlaying: state.isPlaying,
+                        onToggle: () async => state.togglePlayPause(),
+                        onFavorite: () async {
+                          if (track != null) {
+                            await state.toggleFavoriteTrack(track);
+                          }
+                        },
+                      ),
+                      ...savedMixes.map(
+                        (item) => Padding(
+                          padding: const EdgeInsets.only(left: 12),
+                          child: _recorderMiniMixCard(item: item),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 22),
+                _primaryRecorderButton(
+                  label: 'Stop',
+                  onPressed: () async {
+                    final navigator = Navigator.of(context);
+                    await state.stopSleepRecorder();
+                    navigator.pop();
+                  },
+                ),
+                const SizedBox(height: 12),
+                const Text('Tracking in progress...', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w700)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _recorderBenefit({
+    required IconData icon,
+    required String title,
+    required String body,
+  }) {
+    return Row(
+      children: [
+        CircleAvatar(
+          radius: 24,
+          backgroundColor: Colors.white.withValues(alpha: 0.08),
+          child: Icon(icon),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 4),
+              Text(body, style: const TextStyle(color: Colors.white70)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _primaryRecorderButton({
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton(
+        style: FilledButton.styleFrom(
+          backgroundColor: Colors.white,
+          foregroundColor: Colors.black,
+          minimumSize: const Size.fromHeight(58),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+        ),
+        onPressed: onPressed,
+        child: Text(label, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+      ),
+    );
+  }
+
+  Widget _recorderCurrentSelectionCard({
+    required String title,
+    required String subtitle,
+    required Duration duration,
+    required Duration position,
+    required String? timerText,
+    required bool isPlaying,
+    required VoidCallback onToggle,
+    required VoidCallback onFavorite,
+  }) {
+    final maxMs = max(duration.inMilliseconds, 1);
+    final progress = min(position.inMilliseconds / maxMs, 1.0);
+    return Container(
+      width: 232,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        gradient: const LinearGradient(colors: [Color(0xFF2B5AB8), Color(0xFF1A234A)]),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+          Text(subtitle, style: const TextStyle(color: Colors.white70)),
+          const Spacer(),
+          Row(
+            children: [
+              Text(_formatDuration(position), style: const TextStyle(fontSize: 12)),
+              const Spacer(),
+              Text(_formatDuration(duration), style: const TextStyle(fontSize: 12)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              minHeight: 4,
+              value: progress,
+              backgroundColor: Colors.white24,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              Column(
+                children: [
+                  const Icon(Icons.timer_outlined),
+                  if (timerText != null) ...[
+                    const SizedBox(height: 4),
+                    Text(timerText, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  ],
+                ],
+              ),
+              IconButton(
+                onPressed: onToggle,
+                icon: Icon(isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded, size: 36),
+              ),
+              IconButton(
+                onPressed: onFavorite,
+                icon: const Icon(Icons.favorite_border_rounded, size: 30),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _recorderMiniMixCard({required SavedContentItem item}) {
+    return Container(
+      width: 156,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: Colors.white.withValues(alpha: 0.05),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text(item.subtitle ?? 'Mix', style: const TextStyle(color: Colors.white70)),
+          const Spacer(),
+          const Icon(Icons.timer_outlined, color: Colors.white54),
+        ],
+      ),
+    );
+  }
+
+  Future<bool> _showMicrophonePrompt(BuildContext context) async {
+    final granted = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return Dialog(
+          backgroundColor: const Color(0xFF22213F),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+          child: Padding(
+            padding: const EdgeInsets.all(22),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircleAvatar(
+                  radius: 28,
+                  backgroundColor: Color(0xFFFFA04B),
+                  child: Icon(Icons.mic_rounded, color: Colors.white, size: 28),
+                ),
+                const SizedBox(height: 18),
+                const Text(
+                  '"SleepWell" would like to access the Microphone.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Turn on your microphone to learn about your sleep habits and nightly patterns.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 22),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.tonal(
+                        onPressed: () => Navigator.of(dialogContext).pop(false),
+                        child: const Text("Don't Allow"),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton.tonal(
+                        onPressed: () => Navigator.of(dialogContext).pop(true),
+                        child: const Text('Allow'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    return granted ?? false;
+  }
+
+  Future<int?> _showSmartAlarmWindowPicker(BuildContext context) async {
+    final options = <int>[0, 15, 30, 45, 60];
+    return showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 12, 18, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                const Text(
+                  'Select the time frame you\nwant to wake up',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 18),
+                ...options.map(
+                  (value) => ListTile(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(18),
+                      side: BorderSide(
+                        color: widget.state.smartAlarmWindowMinutes == value ? Colors.white70 : Colors.transparent,
+                      ),
+                    ),
+                    leading: const Icon(Icons.alarm_on_rounded),
+                    title: Text(value == 0 ? 'None' : '$value minutes'),
+                    trailing: widget.state.smartAlarmWindowMinutes == value
+                        ? const Icon(Icons.check_rounded)
+                        : null,
+                    onTap: () => Navigator.of(sheetContext).pop(value),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  String _formatAlarmWheel(TimeOfDay value) {
+    final hour = value.hour % 12 == 0 ? 12 : value.hour % 12;
+    final minute = value.minute.toString().padLeft(2, '0');
+    final period = value.hour >= 12 ? 'pm' : 'am';
+    return '${hour.toString().padLeft(2, '0')} : $minute $period';
+  }
+
+  String _formatRecorderClock(DateTime value) {
+    final hour = value.hour.toString().padLeft(2, '0');
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
+  }
+}
+
 class InsightsPage extends StatelessWidget {
   const InsightsPage({super.key, required this.state, required this.onAction});
   final SleepWellState state;
@@ -7766,163 +8707,199 @@ class InsightsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final quality = state.sectionByKey('insight_sleep_quality');
-    final snore = state.sectionByKey('insight_snore');
-    final phases = state.sectionByKey('insight_phases');
-    final qualityItem = quality?.items.isNotEmpty == true ? quality!.items.first : null;
-    final snoreItem = snore?.items.isNotEmpty == true ? snore!.items.first : null;
-    final phasesItem = phases?.items.isNotEmpty == true ? phases!.items.first : null;
-    final qualityScore = qualityItem == null ? 0 : _toInt(qualityItem.meta['score']);
+    return AnimatedBuilder(
+      animation: state,
+      builder: (context, _) {
+        final quality = state.sectionByKey('insight_sleep_quality');
+        final snore = state.sectionByKey('insight_snore');
+        final phases = state.sectionByKey('insight_phases');
+        final qualityItem = quality?.items.isNotEmpty == true ? quality!.items.first : null;
+        final snoreItem = snore?.items.isNotEmpty == true ? snore!.items.first : null;
+        final phasesItem = phases?.items.isNotEmpty == true ? phases!.items.first : null;
+        final qualityScore = qualityItem == null ? 0 : _toInt(qualityItem.meta['score']);
 
-    return ListView(
-      physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 180),
-      children: [
-        const Text('Friday Jul 10', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
-        SizedBox(
-          height: 44,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            itemCount: 7,
-            separatorBuilder: (_, __) => const SizedBox(width: 8),
-            itemBuilder: (_, idx) {
-              final day = 5 + idx;
-              final selected = day == 10;
-              return Container(
-                width: 42,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: selected ? Border.all(color: Colors.white, width: 3.2) : null,
-                  color: selected ? Colors.transparent : Colors.white.withValues(alpha: 0.04),
+        return ListView(
+          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 180),
+          children: [
+            const Text('Friday Jul 10', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 44,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: 7,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (_, idx) {
+                  final day = 5 + idx;
+                  final selected = day == 10;
+                  return Container(
+                    width: 42,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: selected ? Border.all(color: Colors.white, width: 3.2) : null,
+                      color: selected ? Colors.transparent : Colors.white.withValues(alpha: 0.04),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      '$day',
+                      style: TextStyle(
+                        color: selected ? Colors.white : Colors.white38,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            if (state.sleepRecorderActive) ...[
+              const SizedBox(height: 10),
+              _insightCard(
+                minHeight: 118,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Sleep Recorder is active', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Tracking is in progress. Smart alarm: ${state.smartAlarmRangeLabel}',
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                      ),
+                      onPressed: () => onAction(
+                        context,
+                        const HomeItemContent(title: 'Track my sleep', ctaLabel: 'Track my sleep'),
+                        'insight_snore',
+                      ),
+                      child: const Text('Open sleep recorder'),
+                    ),
+                  ],
                 ),
-                alignment: Alignment.center,
-                child: Text(
-                  '$day',
-                  style: TextStyle(
-                    color: selected ? Colors.white : Colors.white38,
-                    fontWeight: FontWeight.w700,
+              ),
+            ],
+            const SizedBox(height: 10),
+            _insightCard(
+              minHeight: 300,
+              child: Column(
+                children: [
+                  SizedBox(
+                    height: 92,
+                    child: CustomPaint(
+                      painter: _InsightsGaugePainter(),
+                      child: const SizedBox.expand(),
+                    ),
                   ),
-                ),
-              );
-            },
-          ),
-        ),
-        const SizedBox(height: 10),
-        _insightCard(
-          minHeight: 300,
-          child: Column(
-            children: [
-              SizedBox(
-                height: 92,
-                child: CustomPaint(
-                  painter: _InsightsGaugePainter(),
-                  child: const SizedBox.expand(),
-                ),
+                  Text('$qualityScore', style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800)),
+                  const Text('Sleep quality', style: TextStyle(color: Colors.white60)),
+                  const SizedBox(height: 8),
+                  Text(
+                    qualityItem?.title ?? 'No Sleep Quality Yet',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    qualityItem?.subtitle ?? 'Track your sleep tonight and wake up to detailed insights here.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70),
+                  ),
+                ],
               ),
-              Text('$qualityScore', style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800)),
-              const Text('Sleep quality', style: TextStyle(color: Colors.white60)),
-              const SizedBox(height: 8),
-              Text(
-                qualityItem?.title ?? 'No Sleep Quality Yet',
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                qualityItem?.subtitle ?? 'Track your sleep tonight and wake up to detailed insights here.',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white70),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 10),
-        _insightCard(
-          minHeight: 188,
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(snoreItem?.title ?? 'Do you snore?', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                    const SizedBox(height: 6),
-                    Text(
-                      snoreItem?.subtitle ?? "Record your sleep sounds to uncover what's disturbing your rest.",
-                      style: const TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 10),
+            _insightCard(
+              minHeight: 188,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(snoreItem?.title ?? 'Do you snore?', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 6),
+                        Text(
+                          snoreItem?.subtitle ?? "Record your sleep sounds to uncover what's disturbing your rest.",
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            foregroundColor: Colors.black,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                            minimumSize: const Size(140, 44),
+                          ),
+                          onPressed: () => onAction(context, snoreItem ?? const HomeItemContent(title: 'Track my sleep'), 'insight_snore'),
+                          child: Text(state.sleepRecorderActive ? 'Open sleep recorder' : (snoreItem?.ctaLabel ?? 'Track my sleep')),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 12),
-                    FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-                        minimumSize: const Size(140, 44),
-                      ),
-                      onPressed: () => onAction(context, snoreItem ?? const HomeItemContent(title: 'Track my sleep'), 'insight_snore'),
-                      child: Text(snoreItem?.ctaLabel ?? 'Track my sleep'),
+                  ),
+                  const SizedBox(width: 12),
+                  Container(
+                    width: 142,
+                    height: 124,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      color: Colors.white.withValues(alpha: 0.09),
                     ),
-                  ],
-                ),
+                    alignment: Alignment.center,
+                    child: const Text('😴', style: TextStyle(fontSize: 64)),
+                  ),
+                ],
               ),
-              const SizedBox(width: 12),
-              Container(
-                width: 142,
-                height: 124,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  color: Colors.white.withValues(alpha: 0.09),
-                ),
-                alignment: Alignment.center,
-                child: const Text('😴', style: TextStyle(fontSize: 64)),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 10),
-        _insightCard(
-          minHeight: 188,
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(phasesItem?.title ?? 'Your Sleep Phases', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                    const SizedBox(height: 6),
-                    Text(
-                      phasesItem?.subtitle ?? 'Learn more about your sleeping patterns and how to improve them.',
-                      style: const TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 10),
+            _insightCard(
+              minHeight: 188,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(phasesItem?.title ?? 'Your Sleep Phases', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 6),
+                        Text(
+                          phasesItem?.subtitle ?? 'Learn more about your sleeping patterns and how to improve them.',
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            foregroundColor: Colors.black,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                            minimumSize: const Size(140, 44),
+                          ),
+                          onPressed: () => onAction(context, phasesItem ?? const HomeItemContent(title: 'Learn more'), 'insight_phases'),
+                          child: Text(phasesItem?.ctaLabel ?? 'Learn more'),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 12),
-                    FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-                        minimumSize: const Size(140, 44),
-                      ),
-                      onPressed: () => onAction(context, phasesItem ?? const HomeItemContent(title: 'Learn more'), 'insight_phases'),
-                      child: Text(phasesItem?.ctaLabel ?? 'Learn more'),
+                  ),
+                  const SizedBox(width: 12),
+                  Container(
+                    width: 142,
+                    height: 124,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      gradient: const LinearGradient(colors: [Color(0xFF2E376F), Color(0xFF2D2E58)]),
                     ),
-                  ],
-                ),
+                    alignment: Alignment.center,
+                    child: const Icon(Icons.multiline_chart_rounded, size: 62, color: Color(0xFFAD7DFF)),
+                  ),
+                ],
               ),
-              const SizedBox(width: 12),
-              Container(
-                width: 142,
-                height: 124,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  gradient: const LinearGradient(colors: [Color(0xFF2E376F), Color(0xFF2D2E58)]),
-                ),
-                alignment: Alignment.center,
-                child: const Icon(Icons.multiline_chart_rounded, size: 62, color: Color(0xFFAD7DFF)),
-              ),
-            ],
-          ),
-        ),
-      ],
+            ),
+          ],
+        );
+      },
     );
   }
 
