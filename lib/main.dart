@@ -103,6 +103,14 @@ class _SleepWellAppState extends State<SleepWellApp> {
   }
 }
 
+enum TrackPlayerKind {
+  meditation,
+  sound,
+  music,
+  brainwave,
+  other,
+}
+
 // Frozen baseline tokens (final UI pass) for consistent spacing/radius.
 class _UiBaseline {
   static const double pageHorizontal = 16;
@@ -1528,6 +1536,23 @@ class SleepTrack {
       return value;
     }
     return '$category • ${talking ? 'Talking' : 'No talking'}';
+  }
+
+  TrackPlayerKind get playerKind {
+    final value = (subtitle ?? '').trim().toLowerCase();
+    if (value == 'meditation') {
+      return TrackPlayerKind.meditation;
+    }
+    if (value == 'sound') {
+      return TrackPlayerKind.sound;
+    }
+    if (value == 'music') {
+      return TrackPlayerKind.music;
+    }
+    if (value == 'brainwave') {
+      return TrackPlayerKind.brainwave;
+    }
+    return TrackPlayerKind.other;
   }
 
   factory SleepTrack.fromJson(Map<String, dynamic> json) {
@@ -5479,7 +5504,7 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
-  void _openTrack(String queryTitle) {
+  Future<void> _openTrack(String queryTitle) async {
     SleepTrack? selected;
     final query = queryTitle.toLowerCase();
     for (final track in widget.state.tracks) {
@@ -5493,11 +5518,618 @@ class _PlayerPageState extends State<PlayerPage> {
     if (selected == null) {
       return;
     }
+    final kind = selected.playerKind;
+    if (kind == TrackPlayerKind.meditation) {
+      if (!context.mounted) {
+        return;
+      }
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => TrackDetailPage(state: widget.state, track: selected!),
+        ),
+      );
+      return;
+    }
+
+    await widget.state.playTrack(selected);
+    if (!mounted) {
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => TrackDetailPage(state: widget.state, track: selected!),
+        builder: (_) => LayeredPlayerPage(
+          state: widget.state,
+          seedTrack: selected!,
+        ),
       ),
     );
+  }
+}
+
+class LayeredPlayerPage extends StatefulWidget {
+  const LayeredPlayerPage({
+    super.key,
+    required this.state,
+    required this.seedTrack,
+  });
+
+  final SleepWellState state;
+  final SleepTrack seedTrack;
+
+  @override
+  State<LayeredPlayerPage> createState() => _LayeredPlayerPageState();
+}
+
+class _LayeredPlayerPageState extends State<LayeredPlayerPage> {
+  SleepTrack? _soundTrack;
+  SleepTrack? _musicTrack;
+  SleepTrack? _brainwaveTrack;
+  TrackPlayerKind _activeKind = TrackPlayerKind.sound;
+
+  double _soundVolume = 0.58;
+  double _musicVolume = 0.58;
+  double _brainwaveVolume = 0.58;
+
+  @override
+  void initState() {
+    super.initState();
+    final kind = widget.seedTrack.playerKind;
+    _activeKind = (kind == TrackPlayerKind.other || kind == TrackPlayerKind.meditation)
+        ? TrackPlayerKind.sound
+        : kind;
+    _setSelectedTrack(_activeKind, widget.seedTrack);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = widget.state;
+    final activeTrack = _selectedTrack(_activeKind);
+    final orderedKinds = <TrackPlayerKind>[
+      _activeKind,
+      ...TrackPlayerKind.values.where(
+        (kind) =>
+            kind != _activeKind &&
+            kind != TrackPlayerKind.meditation &&
+            kind != TrackPlayerKind.other,
+      ),
+    ];
+
+    return Scaffold(
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0xFF1D244B), Color(0xFF151A38), Color(0xFF11162C)],
+                ),
+              ),
+            ),
+          ),
+          SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.keyboard_arrow_down_rounded),
+                      ),
+                      const Spacer(),
+                      Expanded(
+                        child: Column(
+                          children: [
+                            Text(
+                              activeTrack?.title ?? 'Layered Player',
+                              textAlign: TextAlign.center,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+                            ),
+                            Text(
+                              activeTrack == null ? '0 item' : '1 item',
+                              style: const TextStyle(color: Colors.white60),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        onPressed: () {},
+                        icon: const Icon(Icons.ios_share_rounded),
+                      ),
+                      IconButton(
+                        onPressed: () => _openTrackPicker(_activeKind),
+                        icon: const Icon(Icons.add),
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        activeTrack?.title ?? 'Select a track',
+                        style: const TextStyle(fontSize: 40, fontWeight: FontWeight.w700),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        activeTrack?.displaySubtitle ?? 'Mix',
+                        style: const TextStyle(color: Colors.white70, fontSize: 18),
+                      ),
+                      const SizedBox(height: 10),
+                      Slider(
+                        value: state.currentPosition.inMilliseconds
+                            .clamp(0, max(state.currentDuration.inMilliseconds, 1))
+                            .toDouble(),
+                        min: 0,
+                        max: max(state.currentDuration.inMilliseconds, 1).toDouble(),
+                        onChanged: (value) async {
+                          await state.seekTo(Duration(milliseconds: value.round()));
+                        },
+                      ),
+                      Row(
+                        children: [
+                          Text(_formatDuration(state.currentPosition), style: const TextStyle(color: Colors.white70)),
+                          const Spacer(),
+                          Text(
+                            _formatDuration(
+                              state.currentDuration.inMilliseconds <= 0
+                                  ? const Duration(minutes: 30)
+                                  : state.currentDuration,
+                            ),
+                            style: const TextStyle(color: Colors.white70),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          const Icon(Icons.more_horiz, size: 30),
+                          IconButton(
+                            icon: const Icon(Icons.skip_previous_rounded, size: 34),
+                            onPressed: () async => state.playRelativeTrack(-1),
+                          ),
+                          IconButton(
+                            iconSize: _UiBaseline.nowPlayingMainButton,
+                            icon: CircleAvatar(
+                              radius: _UiBaseline.nowPlayingMainButton / 2,
+                              backgroundColor: Colors.white,
+                              child: Icon(
+                                state.isPlaying ? Icons.pause : Icons.play_arrow,
+                                color: Colors.black,
+                                size: _UiBaseline.nowPlayingMainIcon,
+                              ),
+                            ),
+                            onPressed: () async => state.togglePlayPause(),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.skip_next_rounded, size: 34),
+                            onPressed: () async => state.playRelativeTrack(1),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.favorite_border_rounded, size: 30),
+                            onPressed: activeTrack == null
+                                ? null
+                                : () async => state.toggleFavoriteTrack(activeTrack),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF2A2E54),
+                      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Center(
+                          child: Text('Adjust Sounds', style: TextStyle(fontWeight: FontWeight.w700)),
+                        ),
+                        const SizedBox(height: 10),
+                        Expanded(
+                          child: ListView(
+                            physics: const BouncingScrollPhysics(),
+                            children: orderedKinds.map((kind) => _layerSection(kind)).toList(),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Center(
+                          child: OutlinedButton(
+                            onPressed: _clearAllLayers,
+                            style: OutlinedButton.styleFrom(
+                              side: const BorderSide(color: Colors.white24),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                            ),
+                            child: const Text('Clear all'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Container(
+                  margin: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(22),
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF4A3D83), Color(0xFF6A4FA8)],
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _footerAction(
+                            icon: Icons.timer_outlined,
+                            label: 'Set Timer',
+                            onTap: _setTimer,
+                          ),
+                          _footerAction(
+                            icon: widget.state.isPlaying ? Icons.pause : Icons.play_arrow,
+                            label: '',
+                            emphasized: true,
+                            onTap: () async => widget.state.togglePlayPause(),
+                          ),
+                          _footerAction(
+                            icon: Icons.favorite_border_rounded,
+                            label: 'Save Mix',
+                            onTap: () async => widget.state.saveCurrentMixPreset(),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.white.withValues(alpha: 0.2),
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: () async => widget.state.startSleepNow(entryPoint: 'layered_player_track_sleep'),
+                          child: const Text('Track My Sleep'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _layerSection(TrackPlayerKind kind) {
+    final selected = _selectedTrack(kind);
+    final counter = selected == null ? 0 : 1;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          color: Colors.white.withValues(alpha: 0.02),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${_kindLabel(kind)} ($counter/${_kindMax(kind)})',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                _kindDescription(kind),
+                style: const TextStyle(color: Colors.white70),
+              ),
+              const SizedBox(height: 10),
+              if (selected != null)
+                Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 16,
+                      backgroundColor: Colors.white.withValues(alpha: 0.12),
+                      child: IconButton(
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(Icons.close_rounded, size: 16),
+                        onPressed: () {
+                          setState(() => _setSelectedTrack(kind, null));
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(selected.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                          Slider(
+                            value: _volumeFor(kind),
+                            onChanged: (value) => setState(() => _setVolumeFor(kind, value)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                )
+              else
+                const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton.tonal(
+                  style: FilledButton.styleFrom(
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+                  ),
+                  onPressed: () => _openTrackPicker(kind),
+                  child: Text('Add ${_kindLabel(kind)}'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _footerAction({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    bool emphasized = false,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(999),
+      onTap: onTap,
+      child: Column(
+        children: [
+          CircleAvatar(
+            radius: emphasized ? 32 : 22,
+            backgroundColor: Colors.white.withValues(alpha: emphasized ? 0.95 : 0.2),
+            child: Icon(icon, color: emphasized ? Colors.black : Colors.white),
+          ),
+          if (label.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openTrackPicker(TrackPlayerKind kind) async {
+    final options = _filteredTracksFor(kind);
+    if (options.isEmpty) {
+      return;
+    }
+    final selected = await showModalBottomSheet<SleepTrack>(
+      context: context,
+      backgroundColor: const Color(0xFF151C34),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: ListView.separated(
+            itemCount: options.length,
+            separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white12),
+            itemBuilder: (_, idx) {
+              final track = options[idx];
+              return ListTile(
+                title: Text(track.title),
+                subtitle: Text(track.displaySubtitle),
+                onTap: () => Navigator.of(sheetContext).pop(track),
+              );
+            },
+          ),
+        );
+      },
+    );
+
+    if (selected == null) {
+      return;
+    }
+    await widget.state.playTrack(selected);
+    await widget.state.logUiAction('layer_add_${kind.name}');
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _activeKind = kind;
+      _setSelectedTrack(kind, selected);
+    });
+  }
+
+  Future<void> _setTimer() async {
+    final options = <int>[15, 30, 45, 60];
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: const Color(0xFF151C34),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: options
+                .map(
+                  (minutes) => ListTile(
+                    title: Text('Sleep timer: $minutes min'),
+                    onTap: () => Navigator.of(sheetContext).pop(minutes),
+                  ),
+                )
+                .toList(),
+          ),
+        );
+      },
+    );
+    if (selected != null) {
+      await widget.state.setSleepTimerMinutes(selected);
+    }
+  }
+
+  void _clearAllLayers() {
+    setState(() {
+      _soundTrack = null;
+      _musicTrack = null;
+      _brainwaveTrack = null;
+    });
+  }
+
+  List<SleepTrack> _filteredTracksFor(TrackPlayerKind kind) {
+    final all = widget.state.tracks;
+    final byKind = all.where((track) => track.playerKind == kind).toList();
+    if (byKind.isNotEmpty) {
+      return byKind;
+    }
+
+    switch (kind) {
+      case TrackPlayerKind.sound:
+        return all.where((track) => !track.talking).toList();
+      case TrackPlayerKind.music:
+        return all
+            .where((track) =>
+                track.title.toLowerCase().contains('music') ||
+                track.title.toLowerCase().contains('sonata'))
+            .toList();
+      case TrackPlayerKind.brainwave:
+        return all
+            .where((track) =>
+                track.title.toLowerCase().contains('brainwave') ||
+                (track.subtitle ?? '').toLowerCase().contains('brainwave'))
+            .toList();
+      case TrackPlayerKind.meditation:
+      case TrackPlayerKind.other:
+        return all;
+    }
+  }
+
+  SleepTrack? _selectedTrack(TrackPlayerKind kind) {
+    switch (kind) {
+      case TrackPlayerKind.sound:
+        return _soundTrack;
+      case TrackPlayerKind.music:
+        return _musicTrack;
+      case TrackPlayerKind.brainwave:
+        return _brainwaveTrack;
+      case TrackPlayerKind.meditation:
+      case TrackPlayerKind.other:
+        return null;
+    }
+  }
+
+  void _setSelectedTrack(TrackPlayerKind kind, SleepTrack? track) {
+    switch (kind) {
+      case TrackPlayerKind.sound:
+        _soundTrack = track;
+        break;
+      case TrackPlayerKind.music:
+        _musicTrack = track;
+        break;
+      case TrackPlayerKind.brainwave:
+        _brainwaveTrack = track;
+        break;
+      case TrackPlayerKind.meditation:
+      case TrackPlayerKind.other:
+        break;
+    }
+  }
+
+  int _kindMax(TrackPlayerKind kind) {
+    switch (kind) {
+      case TrackPlayerKind.sound:
+        return 15;
+      case TrackPlayerKind.music:
+      case TrackPlayerKind.brainwave:
+        return 1;
+      case TrackPlayerKind.meditation:
+      case TrackPlayerKind.other:
+        return 1;
+    }
+  }
+
+  String _kindLabel(TrackPlayerKind kind) {
+    switch (kind) {
+      case TrackPlayerKind.sound:
+        return 'Sounds';
+      case TrackPlayerKind.music:
+        return 'Music';
+      case TrackPlayerKind.brainwave:
+        return 'Brainwaves';
+      case TrackPlayerKind.meditation:
+        return 'Meditation';
+      case TrackPlayerKind.other:
+        return 'Tracks';
+    }
+  }
+
+  String _kindDescription(TrackPlayerKind kind) {
+    switch (kind) {
+      case TrackPlayerKind.sound:
+        return 'Include relaxing sounds.';
+      case TrackPlayerKind.music:
+        return 'Enhance your mix with music.';
+      case TrackPlayerKind.brainwave:
+        return 'Elevate your mix.';
+      case TrackPlayerKind.meditation:
+        return 'Guided session layer.';
+      case TrackPlayerKind.other:
+        return 'General track layer.';
+    }
+  }
+
+  double _volumeFor(TrackPlayerKind kind) {
+    switch (kind) {
+      case TrackPlayerKind.sound:
+        return _soundVolume;
+      case TrackPlayerKind.music:
+        return _musicVolume;
+      case TrackPlayerKind.brainwave:
+        return _brainwaveVolume;
+      case TrackPlayerKind.meditation:
+      case TrackPlayerKind.other:
+        return 0.58;
+    }
+  }
+
+  void _setVolumeFor(TrackPlayerKind kind, double value) {
+    switch (kind) {
+      case TrackPlayerKind.sound:
+        _soundVolume = value;
+        break;
+      case TrackPlayerKind.music:
+        _musicVolume = value;
+        break;
+      case TrackPlayerKind.brainwave:
+        _brainwaveVolume = value;
+        break;
+      case TrackPlayerKind.meditation:
+      case TrackPlayerKind.other:
+        break;
+    }
   }
 }
 
