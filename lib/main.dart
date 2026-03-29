@@ -5557,17 +5557,6 @@ class _PlayerPageState extends State<PlayerPage> {
     }
 
     await widget.state.playTrack(selected);
-    if (!mounted) {
-      return;
-    }
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => NowPlayingPage(
-          state: widget.state,
-          track: selected!,
-        ),
-      ),
-    );
   }
 }
 
@@ -6193,11 +6182,7 @@ class _TrackDetailPageState extends State<TrackDetailPage> {
                               if (!context.mounted) {
                                 return;
                               }
-                              Navigator.of(context).push(
-                                MaterialPageRoute<void>(
-                                  builder: (_) => NowPlayingPage(state: widget.state, track: widget.track),
-                                ),
-                              );
+                              Navigator.of(context).pop();
                             },
                             child: const Text('Play', style: TextStyle(fontWeight: FontWeight.w700)),
                           ),
