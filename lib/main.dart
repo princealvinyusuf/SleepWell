@@ -5360,7 +5360,8 @@ class _PlayerPageState extends State<PlayerPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Expanded(
+                      AspectRatio(
+                        aspectRatio: 1,
                         child: Container(
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(_UiBaseline.radiusMd),
@@ -5375,11 +5376,14 @@ class _PlayerPageState extends State<PlayerPage> {
                         ),
                       ),
                       const SizedBox(height: 6),
-                      Text(
-                        item.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        textAlign: TextAlign.center,
+                      SizedBox(
+                        height: 58,
+                        child: Text(
+                          item.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                        ),
                       ),
                     ],
                   ),
