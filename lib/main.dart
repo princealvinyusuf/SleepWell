@@ -517,12 +517,18 @@ class SleepWellState extends ChangeNotifier {
     await _playSelectedTrack();
     await _logEvent('play');
     if (isAuthenticated) {
+      final playedAt = DateTime.now();
       unawaited(
         upsertSavedItem(
           itemType: 'recently_played',
           itemRef: '${track.id ?? track.title}',
           title: track.title,
           subtitle: track.displaySubtitle,
+          lastPlayedAt: playedAt,
+          meta: <String, dynamic>{
+            'track_id': track.id,
+            'track_subtitle': track.subtitle,
+          },
         ),
       );
     }
@@ -1345,6 +1351,19 @@ class SleepWellState extends ChangeNotifier {
     final subtitle = track.displaySubtitle;
     if (isFavoriteTrack(track)) {
       localFavoriteRefs.remove(ref);
+      if (isAuthenticated) {
+        final existing = savedCloudItems
+            .where((item) => item.itemType == 'favorites' && item.itemRef == ref)
+            .toList();
+        for (final item in existing) {
+          try {
+            await _api.deleteSavedItem(item.id);
+          } catch (_) {
+            apiConnected = false;
+          }
+        }
+        await refreshCloudSavedItems();
+      }
       await _logEvent('favorite_remove');
       await _persistLocalState();
       notifyListeners();
@@ -1359,6 +1378,10 @@ class SleepWellState extends ChangeNotifier {
         itemRef: ref,
         title: track.title,
         subtitle: subtitle,
+        meta: <String, dynamic>{
+          'track_id': track.id,
+          'track_subtitle': track.subtitle,
+        },
         refreshAfter: false,
       );
       await refreshCloudSavedItems();
@@ -1453,7 +1476,26 @@ class SleepWellState extends ChangeNotifier {
   void setSelectedSleepGoal(String goal) {
     selectedSleepGoal = goal;
     unawaited(_persistLocalState());
+    unawaited(fetchHomeFeed());
     notifyListeners();
+  }
+
+  List<SavedContentItem> cloudSavedByType(String itemType) {
+    final filtered = savedCloudItems
+        .where((item) => item.itemType == itemType)
+        .toList();
+    filtered.sort((a, b) {
+      final aPlayed = a.lastPlayedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final bPlayed = b.lastPlayedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final byPlayed = bPlayed.compareTo(aPlayed);
+      if (byPlayed != 0) {
+        return byPlayed;
+      }
+      final aUpdated = a.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final bUpdated = b.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      return bUpdated.compareTo(aUpdated);
+    });
+    return filtered;
   }
 
   HomeSectionContent? sectionByKey(String key) {
@@ -1960,7 +2002,7 @@ class SleepWellState extends ChangeNotifier {
     await _persistLocalState();
     await refreshMixPresets();
     await refreshInsights();
-    await refreshCloudSavedItems();
+    await refreshSavedPersonalization();
     notifyListeners();
   }
 
@@ -1980,7 +2022,7 @@ class SleepWellState extends ChangeNotifier {
     await _persistLocalState();
     await refreshMixPresets();
     await refreshInsights();
-    await refreshCloudSavedItems();
+    await refreshSavedPersonalization();
     notifyListeners();
   }
 
@@ -2025,12 +2067,21 @@ class SleepWellState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> refreshSavedPersonalization() async {
+    if (!isAuthenticated) {
+      return;
+    }
+    await refreshCloudSavedItems();
+    await fetchHomeFeed();
+  }
+
   Future<void> upsertSavedItem({
     required String itemType,
     required String itemRef,
     required String title,
     String? subtitle,
     Map<String, dynamic> meta = const <String, dynamic>{},
+    DateTime? lastPlayedAt,
     bool refreshAfter = true,
   }) async {
     if (!isAuthenticated) {
@@ -2043,17 +2094,61 @@ class SleepWellState extends ChangeNotifier {
         break;
       }
     }
-    await _api.upsertSavedItem(
-      itemType: itemType,
-      itemRef: itemRef,
-      title: title,
-      subtitle: subtitle,
-      meta: meta,
-      ifUnmodifiedSince: guardTime,
-    );
+    try {
+      await _api.upsertSavedItem(
+        itemType: itemType,
+        itemRef: itemRef,
+        title: title,
+        subtitle: subtitle,
+        meta: meta,
+        ifUnmodifiedSince: guardTime,
+        lastPlayedAt: lastPlayedAt,
+      );
+    } on ApiRequestException catch (error) {
+      if (error.statusCode != 409) {
+        rethrow;
+      }
+      final current = error.responseBody['current'];
+      if (current is Map<String, dynamic>) {
+        final serverItem = SavedContentItem.fromJson(current);
+        savedCloudItems.removeWhere(
+          (item) => item.itemType == serverItem.itemType && item.itemRef == serverItem.itemRef,
+        );
+        savedCloudItems.add(serverItem);
+      }
+      await _api.upsertSavedItem(
+        itemType: itemType,
+        itemRef: itemRef,
+        title: title,
+        subtitle: subtitle,
+        meta: meta,
+        lastPlayedAt: lastPlayedAt,
+      );
+    }
     if (refreshAfter) {
       await refreshCloudSavedItems();
     }
+  }
+
+  Future<void> updateProfile({
+    String? name,
+    String? headline,
+    String? phone,
+    String? bio,
+  }) async {
+    if (!isAuthenticated) {
+      return;
+    }
+    final updatedUser = await _api.updateMe(
+      name: name,
+      headline: headline,
+      phone: phone,
+      bio: bio,
+    );
+    currentUser = updatedUser;
+    await _persistLocalState();
+    await fetchHomeFeed();
+    notifyListeners();
   }
 
   Future<void> fetchAdPlacements() async {
@@ -3066,10 +3161,31 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int index = 0;
   bool showProfile = false;
   bool showSettings = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || !widget.state.isAuthenticated) {
+      return;
+    }
+    unawaited(widget.state.refreshSavedPersonalization());
+    unawaited(widget.state.hydrateProfile());
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -4332,28 +4448,32 @@ class _SavedPageState extends State<SavedPage> {
         final playlists = state.sectionByKey('saved_playlists');
         final findLove = state.sectionByKey('saved_find_love');
         final suggestions = state.sectionByKey('saved_suggestions');
-        final activeSection = switch (_tabIndex) {
-          0 => state.isAuthenticated && state.savedCloudItems.isNotEmpty
-              ? HomeSectionContent(
-                  sectionKey: 'saved_cloud_favorites',
-                  title: 'Favorites',
-                  subtitle: null,
-                  sectionType: 'horizontal',
-                  items: state.savedCloudItems
-                      .where((item) => item.itemType != 'mix')
-                      .map(
-                        (item) => HomeItemContent(
-                          title: item.title,
-                          subtitle: item.subtitle,
-                          meta: item.meta,
-                        ),
-                      )
-                      .toList(),
-                )
-              : favorites,
-          1 => recentlyPlayed,
-          _ => playlists,
+        final cloudFavorites = state.cloudSavedByType('favorites');
+        final cloudRecent = state.cloudSavedByType('recently_played');
+        final cloudPlaylists = state.cloudSavedByType('playlists');
+        final cloudItemsByTab = switch (_tabIndex) {
+          0 => cloudFavorites,
+          1 => cloudRecent,
+          _ => cloudPlaylists,
         };
+        final cloudSectionTitle = switch (_tabIndex) {
+          0 => 'Favorites',
+          1 => 'Recently Played',
+          _ => 'Playlists',
+        };
+        final activeSection = cloudItemsByTab.isNotEmpty
+            ? HomeSectionContent(
+                sectionKey: 'saved_cloud_${cloudSectionTitle.toLowerCase().replaceAll(' ', '_')}',
+                title: cloudSectionTitle,
+                subtitle: null,
+                sectionType: 'horizontal',
+                items: cloudItemsByTab.map(_savedItemAsHomeItem).toList(),
+              )
+            : switch (_tabIndex) {
+                0 => _localFavoritesSection(state) ?? favorites,
+                1 => recentlyPlayed,
+                _ => playlists,
+              };
         final showFindLoveGrid = _tabIndex != 0;
 
         return Stack(
@@ -4442,7 +4562,9 @@ class _SavedPageState extends State<SavedPage> {
                 if (_tabIndex == 0 && suggestions != null && suggestions.items.isNotEmpty) ...[
                   const SizedBox(height: 8),
                   Text(
-                    suggestions.title ?? 'Suggestions for you',
+                    state.currentUser?.headline?.trim().isNotEmpty == true
+                        ? '${state.currentUser!.headline} picks'
+                        : (suggestions.title ?? 'Suggestions for you'),
                     style: const TextStyle(fontSize: _UiBaseline.savedSectionTitleSize, fontWeight: FontWeight.w800, letterSpacing: -0.5),
                   ),
                   const SizedBox(height: 8),
@@ -4543,8 +4665,73 @@ class _SavedPageState extends State<SavedPage> {
     );
   }
 
+  HomeItemContent _savedItemAsHomeItem(SavedContentItem item) {
+    final itemType = item.itemType.toLowerCase();
+    final mergedMeta = <String, dynamic>{
+      ...item.meta,
+      'source_item_type': itemType,
+      'source_item_ref': item.itemRef,
+      'updated_at': item.updatedAt?.toIso8601String(),
+      if (item.lastPlayedAt != null) 'last_played_at': item.lastPlayedAt!.toIso8601String(),
+    };
+    if ((mergedMeta['action']?.toString() ?? '').isEmpty) {
+      mergedMeta['action'] = itemType == 'playlists' ? 'arrow' : 'more';
+    }
+    return HomeItemContent(
+      title: item.title,
+      subtitle: item.subtitle,
+      meta: mergedMeta,
+    );
+  }
+
+  HomeSectionContent? _localFavoritesSection(SleepWellState state) {
+    if (state.localFavoriteRefs.isEmpty) {
+      return null;
+    }
+    final items = <HomeItemContent>[];
+    for (final ref in state.localFavoriteRefs) {
+      for (final track in state.tracks) {
+        final trackRef = '${track.id ?? track.title}';
+        if (trackRef != ref) {
+          continue;
+        }
+        items.add(
+          HomeItemContent(
+            title: track.title,
+            subtitle: track.displaySubtitle,
+            meta: <String, dynamic>{
+              'action': 'more',
+              'source_item_type': 'favorites_local',
+              'source_item_ref': ref,
+            },
+          ),
+        );
+        break;
+      }
+    }
+    if (items.isEmpty) {
+      return null;
+    }
+    return HomeSectionContent(
+      sectionKey: 'saved_local_favorites',
+      title: 'Favorites',
+      subtitle: null,
+      sectionType: 'horizontal',
+      items: items,
+    );
+  }
+
   Widget _trailingAction({required HomeItemContent item, required int tabIndex}) {
     final action = (item.meta['action']?.toString() ?? '').toLowerCase();
+    final sourceType = (item.meta['source_item_type']?.toString() ?? '').toLowerCase();
+    if (sourceType == 'playlists') {
+      return const Icon(Icons.chevron_right_rounded, size: 24);
+    }
+    if (sourceType == 'favorites' ||
+        sourceType == 'favorites_local' ||
+        sourceType == 'mix') {
+      return const Icon(Icons.favorite_border_rounded, size: 22);
+    }
     if (action == 'arrow') {
       return const Icon(Icons.chevron_right_rounded, size: 24);
     }
@@ -10830,17 +11017,29 @@ class AppUserProfile {
     required this.id,
     required this.name,
     required this.email,
+    this.role,
+    this.headline,
+    this.phone,
+    this.bio,
   });
 
   final int id;
   final String name;
   final String email;
+  final String? role;
+  final String? headline;
+  final String? phone;
+  final String? bio;
 
   factory AppUserProfile.fromJson(Map<String, dynamic> json) {
     return AppUserProfile(
       id: _toInt(json['id']),
       name: '${json['name'] ?? ''}',
       email: '${json['email'] ?? ''}',
+      role: json['role']?.toString(),
+      headline: json['headline']?.toString(),
+      phone: json['phone']?.toString(),
+      bio: json['bio']?.toString(),
     );
   }
 
@@ -10849,6 +11048,10 @@ class AppUserProfile {
       'id': id,
       'name': name,
       'email': email,
+      'role': role,
+      'headline': headline,
+      'phone': phone,
+      'bio': bio,
     };
   }
 }
@@ -10871,6 +11074,7 @@ class SavedContentItem {
     required this.title,
     this.subtitle,
     this.meta = const <String, dynamic>{},
+    this.lastPlayedAt,
     this.updatedAt,
   });
 
@@ -10880,6 +11084,7 @@ class SavedContentItem {
   final String title;
   final String? subtitle;
   final Map<String, dynamic> meta;
+  final DateTime? lastPlayedAt;
   final DateTime? updatedAt;
 
   factory SavedContentItem.fromJson(Map<String, dynamic> json) {
@@ -10893,6 +11098,7 @@ class SavedContentItem {
       title: '${json['title'] ?? ''}',
       subtitle: json['subtitle']?.toString(),
       meta: meta,
+      lastPlayedAt: DateTime.tryParse('${json['last_played_at'] ?? ''}'),
       updatedAt: DateTime.tryParse('${json['updated_at'] ?? ''}'),
     );
   }
@@ -10905,6 +11111,7 @@ class SavedContentItem {
       'title': title,
       'subtitle': subtitle,
       'meta': meta,
+      'last_played_at': lastPlayedAt?.toIso8601String(),
       'updated_at': updatedAt?.toIso8601String(),
     };
   }
@@ -11895,6 +12102,7 @@ class SleepWellApi {
     String? goal,
     String? timeSegment,
     String? deviceId,
+    String? screen,
   }) async {
     final params = <String>[];
     if (goal != null && goal.isNotEmpty) {
@@ -11905,6 +12113,9 @@ class SleepWellApi {
     }
     if (deviceId != null && deviceId.isNotEmpty) {
       params.add('device_id=${Uri.encodeQueryComponent(deviceId)}');
+    }
+    if (screen != null && screen.isNotEmpty) {
+      params.add('screen=${Uri.encodeQueryComponent(screen)}');
     }
     final suffix = params.isEmpty ? '' : '?${params.join('&')}';
     final json = await _request('GET', '/home-feed$suffix');
@@ -12178,6 +12389,7 @@ class SleepWellApi {
     String? subtitle,
     Map<String, dynamic> meta = const <String, dynamic>{},
     DateTime? ifUnmodifiedSince,
+    DateTime? lastPlayedAt,
   }) async {
     await _request(
       'POST',
@@ -12188,6 +12400,7 @@ class SleepWellApi {
         'title': title,
         'subtitle': subtitle,
         'meta': meta,
+        if (lastPlayedAt != null) 'last_played_at': lastPlayedAt.toIso8601String(),
         if (ifUnmodifiedSince != null) 'if_unmodified_since': ifUnmodifiedSince.toIso8601String(),
       },
     );
@@ -12195,6 +12408,28 @@ class SleepWellApi {
 
   Future<void> deleteSavedItem(int savedItemId) async {
     await _request('DELETE', '/saved-items/$savedItemId');
+  }
+
+  Future<AppUserProfile> updateMe({
+    String? name,
+    String? headline,
+    String? phone,
+    String? bio,
+  }) async {
+    final json = await _request(
+      'PUT',
+      '/auth/me',
+      body: <String, dynamic>{
+        if (name != null) 'name': name,
+        if (headline != null) 'headline': headline,
+        if (phone != null) 'phone': phone,
+        if (bio != null) 'bio': bio,
+      },
+    );
+    final userRaw = (json['user'] is Map<String, dynamic>)
+        ? json['user'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    return AppUserProfile.fromJson(userRaw);
   }
 
   Future<List<SleepTrack>> searchTracks(
@@ -12257,14 +12492,18 @@ class SleepWellApi {
     final raw = await response.transform(utf8.decoder).join();
     client.close();
 
+    final decoded = raw.isEmpty ? null : jsonDecode(raw);
     if (response.statusCode >= 400) {
-      throw HttpException('API request failed (${response.statusCode})', uri: uri);
+      throw ApiRequestException(
+        statusCode: response.statusCode,
+        uri: uri,
+        responseBody: decoded is Map<String, dynamic> ? decoded : <String, dynamic>{},
+      );
     }
 
     if (raw.isEmpty) {
       return <String, dynamic>{};
     }
-    final decoded = jsonDecode(raw);
     if (decoded is Map<String, dynamic>) {
       return decoded;
     }
@@ -12324,6 +12563,17 @@ class SleepWellApi {
     }
     return <String, dynamic>{};
   }
+}
+
+class ApiRequestException extends HttpException {
+  ApiRequestException({
+    required this.statusCode,
+    required Uri uri,
+    this.responseBody = const <String, dynamic>{},
+  }) : super('API request failed ($statusCode)', uri: uri);
+
+  final int statusCode;
+  final Map<String, dynamic> responseBody;
 }
 
 String _normalizeMediaUrl(String input, {required String apiBaseUrl}) {
